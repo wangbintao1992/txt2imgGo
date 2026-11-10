@@ -59,8 +59,9 @@ type app struct {
 	status    string
 	statusErr bool
 
-	generating bool
-	progress   float64
+	generating   bool
+	exportingPDF bool
+	progress     float64
 
 	renderSeq atomic.Uint64
 }
@@ -181,7 +182,7 @@ func (a *app) view(c *ui.Context) {
 						a.outputPanel(c)
 					})
 				})
-				a.generateButton(c)
+				a.actionButtons(c)
 			})
 			a.previewPanel(c)
 		})
@@ -338,18 +339,28 @@ func (a *app) outputPanel(c *ui.Context) {
 	})
 }
 
-func (a *app) generateButton(c *ui.Context) {
+func (a *app) actionButtons(c *ui.Context) {
 	if a.generating {
 		ui.Progress(c, a.progress).Width(leftContentWidth)
 	}
-	label := "开始生成图片"
+	imageLabel := "生成图片"
+	pdfLabel := "导出 PDF"
 	if a.generating {
-		label = "正在生成…"
+		if a.exportingPDF {
+			pdfLabel = "正在导出…"
+		} else {
+			imageLabel = "正在生成…"
+		}
 	}
-	if ui.PrimaryButton(c, label).Width(leftContentWidth).Height(44).
-		Disabled(a.generating || strings.TrimSpace(a.text) == "").Clicked() {
-		a.generate()
-	}
+	disabled := a.generating || strings.TrimSpace(a.text) == ""
+	ui.Row(c).Width(leftContentWidth).Gap(8).Children(func() {
+		if ui.PrimaryButton(c, imageLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
+			a.generate()
+		}
+		if ui.Button(c, pdfLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
+			a.choosePDFExport()
+		}
+	})
 }
 
 func (a *app) previewPanel(c *ui.Context) {
@@ -614,15 +625,7 @@ func (a *app) generate() {
 		return
 	}
 
-	out := strings.TrimSpace(a.outputDir)
-	if out == "" {
-		if a.sourcePath != "" {
-			out = filepath.Dir(a.sourcePath)
-		} else if wd, err := os.Getwd(); err == nil {
-			out = wd
-		}
-	}
-	out = expandHome(out)
+	out := a.resolveOutputDir()
 	if out == "" {
 		a.setStatus("请选择输出目录", true)
 		return
@@ -640,13 +643,11 @@ func (a *app) generate() {
 		watermarkOpacity: a.watermarkOpacity / 100,
 		watermarkAngle:   a.watermarkAngle,
 	}
-	base := "txt2img"
-	if a.sourcePath != "" {
-		base = safeFileBase(strings.TrimSuffix(filepath.Base(a.sourcePath), filepath.Ext(a.sourcePath)))
-	}
+	base := a.documentBaseName()
 
 	a.renderSeq.Add(1)
 	a.generating = true
+	a.exportingPDF = false
 	a.progress = 0
 	a.statusErr = false
 	a.setStatus("正在准备生成…", false)
@@ -671,13 +672,7 @@ func (a *app) generate() {
 			digits = 3
 		}
 		for i := 0; i < doc.Pages(); i++ {
-			img, err := RenderPage(doc, i, RenderOptions{
-				Font:             snap.font,
-				Watermark:        snap.watermark,
-				WatermarkSize:    snap.watermarkSize,
-				WatermarkOpacity: snap.watermarkOpacity,
-				WatermarkAngle:   snap.watermarkAngle,
-			})
+			img, err := RenderPage(doc, i, snap.renderOptions())
 			if err != nil {
 				a.finishGenerateError(fmt.Sprintf("生成第 %d 页失败: %v", i+1, err))
 				return
@@ -708,6 +703,7 @@ func (a *app) generate() {
 
 		a.win.Update(func() {
 			a.generating = false
+			a.exportingPDF = false
 			a.progress = 1
 			a.outputDir = out
 			a.setStatus(fmt.Sprintf("已生成 %d 张图片 · %s", doc.Pages(), out), false)
@@ -723,16 +719,160 @@ func (a *app) generate() {
 	}()
 }
 
+func (a *app) choosePDFExport() {
+	if a.generating {
+		return
+	}
+	if strings.TrimSpace(a.text) == "" {
+		a.setStatus("请先选择 TXT 文件", true)
+		return
+	}
+	out := a.resolveOutputDir()
+	base := a.documentBaseName()
+	defaultPath := filepath.Join(out, base+".pdf")
+	a.setStatus("请选择 PDF 保存位置…", false)
+
+	go func() {
+		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+			Parent:            a.win,
+			Title:             "导出 PDF",
+			DefaultPath:       defaultPath,
+			Filters:           []mygo.FileFilter{{Name: "PDF 文档", Extensions: []string{"pdf"}}},
+			CreateDirectories: true,
+		})
+		if err != nil {
+			a.win.Update(func() { a.setStatus("选择 PDF 保存位置失败: "+err.Error(), true) })
+			return
+		}
+		if strings.TrimSpace(path) == "" {
+			a.win.Update(func() { a.setStatus("已取消导出 PDF", false) })
+			return
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".pdf") {
+			path += ".pdf"
+		}
+		a.win.Update(func() { a.startPDFExport(path) })
+	}()
+}
+
+func (a *app) startPDFExport(path string) {
+	if a.generating {
+		return
+	}
+	snap, err := a.makeSnapshot()
+	if err != nil {
+		a.setStatus(err.Error(), true)
+		return
+	}
+	a.renderSeq.Add(1)
+	a.generating = true
+	a.exportingPDF = true
+	a.progress = 0
+	a.statusErr = false
+	a.setStatus("正在准备导出 PDF…", false)
+	if a.win == nil {
+		a.generating = false
+		a.exportingPDF = false
+		return
+	}
+
+	go func() {
+		doc := BuildDocument(snap.text, snap.split, snap.chars, snap.width, snap.height)
+		if doc.Pages() == 0 {
+			a.finishGenerateError("没有可导出的内容")
+			return
+		}
+		dir := filepath.Dir(path)
+		if dir == "" {
+			dir = "."
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			a.finishGenerateError("创建 PDF 目录失败: " + err.Error())
+			return
+		}
+		f, err := os.Create(path)
+		if err != nil {
+			a.finishGenerateError("创建 PDF 失败: " + err.Error())
+			return
+		}
+		err = WritePDF(f, doc, snap.renderOptions(), func(done, total int) {
+			a.win.Update(func() {
+				a.progress = float64(done) / float64(total)
+				a.status = fmt.Sprintf("正在导出 PDF %d / %d", done, total)
+			})
+		})
+		closeErr := f.Close()
+		if err != nil {
+			_ = os.Remove(path)
+			a.finishGenerateError("导出 PDF 失败: " + err.Error())
+			return
+		}
+		if closeErr != nil {
+			_ = os.Remove(path)
+			a.finishGenerateError("保存 PDF 失败: " + closeErr.Error())
+			return
+		}
+
+		a.win.Update(func() {
+			a.generating = false
+			a.exportingPDF = false
+			a.progress = 1
+			a.outputDir = dir
+			a.setStatus(fmt.Sprintf("已导出 %d 页 PDF · %s", doc.Pages(), path), false)
+		})
+		_, _ = mygo.Dialog.Message(mygo.MessageOptions{
+			Parent:  a.win,
+			Type:    mygo.MessageInfo,
+			Title:   "PDF 导出成功",
+			Message: fmt.Sprintf("已导出 %d 页 PDF", doc.Pages()),
+			Detail:  path,
+			Buttons: []string{"好"},
+		})
+	}()
+}
+
 func (a *app) finishGenerateError(message string) {
 	if a.win == nil {
 		a.generating = false
+		a.exportingPDF = false
 		return
 	}
 	a.win.Update(func() {
 		a.generating = false
+		a.exportingPDF = false
 		a.progress = 0
 		a.setStatus(message, true)
 	})
+}
+
+func (a *app) resolveOutputDir() string {
+	out := strings.TrimSpace(a.outputDir)
+	if out == "" {
+		if a.sourcePath != "" {
+			out = filepath.Dir(a.sourcePath)
+		} else if wd, err := os.Getwd(); err == nil {
+			out = wd
+		}
+	}
+	return expandHome(out)
+}
+
+func (a *app) documentBaseName() string {
+	base := "txt2img"
+	if a.sourcePath != "" {
+		base = safeFileBase(strings.TrimSuffix(filepath.Base(a.sourcePath), filepath.Ext(a.sourcePath)))
+	}
+	return base
+}
+
+func (s previewSnapshot) renderOptions() RenderOptions {
+	return RenderOptions{
+		Font:             s.font,
+		Watermark:        s.watermark,
+		WatermarkSize:    s.watermarkSize,
+		WatermarkOpacity: s.watermarkOpacity,
+		WatermarkAngle:   s.watermarkAngle,
+	}
 }
 
 func (a *app) setStatus(message string, isError bool) {
