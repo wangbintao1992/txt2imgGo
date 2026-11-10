@@ -36,6 +36,8 @@ type app struct {
 
 	splitParagraphs bool
 	charsPerLine    float64
+	outputWidth     float64
+	outputHeight    float64
 
 	fontName    string
 	fonts       []fontOption
@@ -68,6 +70,8 @@ func newApp() *app {
 	a := &app{
 		splitParagraphs:  true,
 		charsPerLine:     30,
+		outputWidth:      pageWidth,
+		outputHeight:     pageHeight,
 		fontName:         systemFontName,
 		systemFont:       ref,
 		watermarkSize:    46,
@@ -169,13 +173,15 @@ func (a *app) view(c *ui.Context) {
 		})
 
 		ui.Row(c).Fill().Gap(18).Children(func() {
-			ui.Scroll(c).Width(leftPaneWidth).FillHeight().Children(func() {
-				ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
-					a.dropZone(c)
-					a.settingsPanel(c)
-					a.outputPanel(c)
-					a.generateButton(c)
+			ui.Column(c).Width(leftPaneWidth).FillHeight().Gap(10).Children(func() {
+				ui.Scroll(c).Grow(1).Children(func() {
+					ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
+						a.dropZone(c)
+						a.settingsPanel(c)
+						a.outputPanel(c)
+					})
 				})
+				a.generateButton(c)
 			})
 			a.previewPanel(c)
 		})
@@ -184,7 +190,7 @@ func (a *app) view(c *ui.Context) {
 
 func (a *app) dropZone(c *ui.Context) {
 	t := c.Theme()
-	zone := ui.Column(c).Width(leftContentWidth).Height(132).Padding(14).Gap(6).
+	zone := ui.Column(c).Width(leftContentWidth).Height(108).Padding(12).Gap(5).
 		Radius(12).Background(t.Surface).Border(1, t.Border).
 		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.generating)
 
@@ -304,13 +310,30 @@ func (a *app) outputPanel(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
-		ui.Text(c, "输出位置").FontSize(14).Bold()
+		ui.Text(c, "输出设置").FontSize(14).Bold()
+
+		beforeWidth, beforeHeight := a.outputWidth, a.outputHeight
+		a.settingRow(c, "图片宽度", func() {
+			ui.NumberInput(c, &a.outputWidth, minPageWidth, maxPageWidth, 1).Width(120)
+			ui.Text(c, "px").FontSize(11).TextColor(t.TextMuted)
+			ui.Box(c).Grow(1)
+		})
+		a.settingRow(c, "图片高度", func() {
+			ui.NumberInput(c, &a.outputHeight, minPageHeight, maxPageHeight, 1).Width(120)
+			ui.Text(c, "px").FontSize(11).TextColor(t.TextMuted)
+			ui.Box(c).Grow(1)
+		})
+		if beforeWidth != a.outputWidth || beforeHeight != a.outputHeight {
+			a.schedulePreview(220 * time.Millisecond)
+		}
+
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.TextInput(c, &a.outputDir).Placeholder("默认与 TXT 文件同目录").Grow(1)
 			if ui.Button(c, "选择…").Width(72).Clicked() {
 				a.chooseOutputDir()
 			}
 		})
+		ui.Text(c, "宽 320–4000 · 高 320–6000 px；文字会按图片尺寸自动重排，不会截断").FontSize(11).TextColor(t.TextMuted)
 		ui.Text(c, "生成 PNG 图片，文件名由源文件与页码组成").FontSize(11).TextColor(t.TextMuted)
 	})
 }
@@ -380,6 +403,8 @@ type previewSnapshot struct {
 	text             string
 	split            bool
 	chars            int
+	width            int
+	height           int
 	font             FontRef
 	watermark        string
 	watermarkSize    float64
@@ -397,6 +422,8 @@ func (a *app) makeSnapshot() (previewSnapshot, error) {
 		text:             a.text,
 		split:            a.splitParagraphs,
 		chars:            int(math.Round(a.charsPerLine)),
+		width:            int(math.Round(a.outputWidth)),
+		height:           int(math.Round(a.outputHeight)),
 		font:             ref,
 		watermark:        a.watermark,
 		watermarkSize:    a.watermarkSize,
@@ -433,7 +460,7 @@ func (a *app) schedulePreview(delay time.Duration) {
 			return
 		}
 
-		doc := BuildDocument(snap.text, snap.split, snap.chars)
+		doc := BuildDocument(snap.text, snap.split, snap.chars, snap.width, snap.height)
 		if doc.Pages() == 0 {
 			a.win.Update(func() {
 				if a.renderSeq.Load() != seq {
@@ -605,6 +632,8 @@ func (a *app) generate() {
 		text:             a.text,
 		split:            a.splitParagraphs,
 		chars:            int(math.Round(a.charsPerLine)),
+		width:            int(math.Round(a.outputWidth)),
+		height:           int(math.Round(a.outputHeight)),
 		font:             ref,
 		watermark:        a.watermark,
 		watermarkSize:    a.watermarkSize,
@@ -627,7 +656,7 @@ func (a *app) generate() {
 	}
 
 	go func() {
-		doc := BuildDocument(snap.text, snap.split, snap.chars)
+		doc := BuildDocument(snap.text, snap.split, snap.chars, snap.width, snap.height)
 		if doc.Pages() == 0 {
 			a.finishGenerateError("没有可生成的内容")
 			return
@@ -755,7 +784,7 @@ func main() {
 			Height:    860,
 			MinWidth:  980,
 			MinHeight: 720,
-			StateKey:  "main",
+			StateKey:  "main-v2",
 			Content:   ui.View(a.view),
 		})
 		a.startFontScan()

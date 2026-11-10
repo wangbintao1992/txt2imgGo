@@ -23,11 +23,14 @@ import (
 const (
 	pageWidth      = 1240
 	pageHeight     = 1754
+	minPageWidth   = 320
+	maxPageWidth   = 4000
+	minPageHeight  = 320
+	maxPageHeight  = 6000
 	pageMarginX    = 96
 	pageMarginTop  = 110
 	pageMarginBot  = 120
 	maxFontSize    = 36.0
-	minFontSize    = 6.0
 	lineHeightRate = 1.7
 	footerFontSize = 17.0
 )
@@ -43,11 +46,17 @@ type Line struct {
 }
 
 type Document struct {
-	Lines        []Line
-	PageStarts   []int
-	LinesPerPage int
-	FontSize     float64
-	LineHeight   int
+	Lines          []Line
+	PageStarts     []int
+	LinesPerPage   int
+	FontSize       float64
+	LineHeight     int
+	PageWidth      int
+	PageHeight     int
+	MarginX        int
+	MarginTop      int
+	MarginBottom   int
+	FooterFontSize float64
 }
 
 func (d *Document) Pages() int {
@@ -66,26 +75,44 @@ func (d *Document) PageLines(page int) []Line {
 	return d.Lines[start:end]
 }
 
-func BuildDocument(text string, splitParagraphs bool, charsPerLine int) *Document {
+func BuildDocument(text string, splitParagraphs bool, charsPerLine, width, height int) *Document {
 	if charsPerLine < 1 {
 		charsPerLine = 1
 	}
 	if charsPerLine > 100 {
 		charsPerLine = 100
 	}
+	width = clampInt(width, minPageWidth, maxPageWidth)
+	height = clampInt(height, minPageHeight, maxPageHeight)
 
-	contentWidth := pageWidth - 2*pageMarginX
-	size := math.Min(maxFontSize, float64(contentWidth)/float64(charsPerLine))
-	if size < minFontSize {
-		size = minFontSize
+	marginX := scaledDimension(width, pageMarginX, pageWidth, 8, width/4)
+	marginTop := scaledDimension(height, pageMarginTop, pageHeight, 8, height/5)
+	marginBottom := scaledDimension(height, pageMarginBot, pageHeight, 8, height/5)
+	contentWidth := width - 2*marginX
+	contentHeight := height - marginTop - marginBottom
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	maxSizeByWidth := maxFontSize * float64(width) / float64(pageWidth)
+	size := math.Min(maxSizeByWidth, float64(contentWidth)/float64(charsPerLine))
+	maxSizeByHeight := float64(contentHeight) / lineHeightRate
+	if size > maxSizeByHeight {
+		size = maxSizeByHeight
+	}
+	if size < 1 {
+		size = 1
 	}
 	lineHeight := int(math.Round(size * lineHeightRate))
-	if lineHeight < 12 {
-		lineHeight = 12
+	if lineHeight < 1 {
+		lineHeight = 1
 	}
 
 	lines := buildLines(text, splitParagraphs, charsPerLine)
-	linesPerPage := (pageHeight - pageMarginTop - pageMarginBot) / lineHeight
+	linesPerPage := contentHeight / lineHeight
 	if linesPerPage < 1 {
 		linesPerPage = 1
 	}
@@ -102,13 +129,44 @@ func BuildDocument(text string, splitParagraphs bool, charsPerLine int) *Documen
 		i += linesPerPage
 	}
 
-	return &Document{
-		Lines:        lines,
-		PageStarts:   starts,
-		LinesPerPage: linesPerPage,
-		FontSize:     size,
-		LineHeight:   lineHeight,
+	footerSize := footerFontSize * float64(width) / float64(pageWidth)
+	if footerSize < 8 {
+		footerSize = 8
 	}
+	return &Document{
+		Lines:          lines,
+		PageStarts:     starts,
+		LinesPerPage:   linesPerPage,
+		FontSize:       size,
+		LineHeight:     lineHeight,
+		PageWidth:      width,
+		PageHeight:     height,
+		MarginX:        marginX,
+		MarginTop:      marginTop,
+		MarginBottom:   marginBottom,
+		FooterFontSize: footerSize,
+	}
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func scaledDimension(value, base, baseTotal, minimum, maximum int) int {
+	out := int(math.Round(float64(value) * float64(base) / float64(baseTotal)))
+	if out < minimum {
+		out = minimum
+	}
+	if maximum > 0 && out > maximum {
+		out = maximum
+	}
+	return out
 }
 
 func buildLines(text string, splitParagraphs bool, charsPerLine int) []Line {
@@ -220,7 +278,7 @@ func RenderPage(doc *Document, page int, opt RenderOptions) (*image.RGBA, error)
 	}
 	defer face.Close()
 
-	img := image.NewRGBA(image.Rect(0, 0, pageWidth, pageHeight))
+	img := image.NewRGBA(image.Rect(0, 0, doc.PageWidth, doc.PageHeight))
 	draw.Draw(img, img.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
 
 	if strings.TrimSpace(opt.Watermark) != "" {
@@ -261,9 +319,9 @@ func RenderPage(doc *Document, page int, opt RenderOptions) (*image.RGBA, error)
 		if line.Blank || line.Text == "" {
 			continue
 		}
-		top := pageMarginTop + i*doc.LineHeight
+		top := doc.MarginTop + i*doc.LineHeight
 		baseline := top + ascent.Ceil() + (doc.LineHeight-ascent.Ceil()-descent.Ceil())/2
-		d.Dot = fixed.P(pageMarginX, baseline)
+		d.Dot = fixed.P(doc.MarginX, baseline)
 		d.DrawString(line.Text)
 	}
 
@@ -272,7 +330,7 @@ func RenderPage(doc *Document, page int, opt RenderOptions) (*image.RGBA, error)
 }
 
 func drawFooter(dst *image.RGBA, doc *Document, page int, ref FontRef) {
-	face, err := newFontFace(ref, footerFontSize)
+	face, err := newFontFace(ref, doc.FooterFontSize)
 	if err != nil {
 		return
 	}
@@ -285,7 +343,11 @@ func drawFooter(dst *image.RGBA, doc *Document, page int, ref FontRef) {
 		Face: face,
 	}
 	width := d.MeasureString(label).Ceil()
-	d.Dot = fixed.P(pageWidth-pageMarginX-width, pageHeight-56)
+	footerBottom := int(math.Round(float64(doc.PageHeight) * 56 / pageHeight))
+	if footerBottom < 12 {
+		footerBottom = 12
+	}
+	d.Dot = fixed.P(doc.PageWidth-doc.MarginX-width, doc.PageHeight-footerBottom)
 	d.DrawString(label)
 }
 
@@ -331,13 +393,14 @@ func drawDiagonalWatermark(dst *image.RGBA, text string, face font.Face, angle, 
 		return
 	}
 
+	pageW, pageH := dst.Bounds().Dx(), dst.Bounds().Dy()
 	row := 0
-	for y := -th; y < pageHeight+th; y += stepY {
+	for y := -th; y < pageH+th; y += stepY {
 		offset := 0
 		if row%2 == 1 {
 			offset = stepX / 2
 		}
-		for x := -tw - offset; x < pageWidth+tw; x += stepX {
+		for x := -tw - offset; x < pageW+tw; x += stepX {
 			r := image.Rect(x+offset, y, x+offset+tw, y+th)
 			draw.Draw(dst, r, rotated, image.Point{}, draw.Over)
 		}
