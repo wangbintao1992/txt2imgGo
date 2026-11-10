@@ -1,7 +1,9 @@
 package main
 
 import (
+	"image"
 	"image/color"
+	"image/draw"
 	"strings"
 	"testing"
 )
@@ -66,5 +68,33 @@ func TestRenderPage(t *testing.T) {
 	}
 	if nonWhite < 50 {
 		t.Fatalf("rendered page has only %d non-white samples", nonWhite)
+	}
+}
+
+func TestWatermarkVisible(t *testing.T) {
+	ref, ok := detectSystemFont()
+	if !ok {
+		t.Skip("no system font found")
+	}
+	face, err := newFontFace(ref, 46)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer face.Close()
+
+	img := image.NewRGBA(image.Rect(0, 0, pageWidth, pageHeight))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	drawDiagonalWatermark(img, "内部资料 INTERNAL", face, -30, 0.14)
+
+	nonWhite := 0
+	for y := 0; y < pageHeight; y += 2 {
+		for x := 0; x < pageWidth; x += 2 {
+			if img.RGBAAt(x, y) != (color.RGBA{255, 255, 255, 255}) {
+				nonWhite++
+			}
+		}
+	}
+	if nonWhite < 100 {
+		t.Fatalf("watermark has only %d non-white samples", nonWhite)
 	}
 }
