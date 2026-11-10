@@ -211,14 +211,36 @@ func (a *app) dropZone(c *ui.Context) {
 			ui.Textf(c, "%d 字符 · 共 %d 张图片", utf8.RuneCountInString(a.text), a.pages).
 				FontSize(11).TextColor(t.TextMuted)
 		}
-		label := "选择 TXT 文件"
-		if a.sourcePath != "" {
-			label = "更换文件"
-		}
-		if ui.Button(c, label).Width(150).Clicked() {
-			a.chooseTXT()
+		if a.sourcePath == "" {
+			if ui.Button(c, "选择 TXT 文件").Width(150).Clicked() {
+				a.chooseTXT()
+			}
+		} else {
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c, "更换文件").Width(110).Clicked() {
+					a.chooseTXT()
+				}
+				if ui.Button(c, "清空").Width(80).Clicked() {
+					a.clearSelectedFile()
+				}
+			})
 		}
 	})
+}
+
+func (a *app) clearSelectedFile() {
+	if a.generating {
+		return
+	}
+	a.renderSeq.Add(1)
+	a.text = ""
+	a.sourcePath = ""
+	a.page = 0
+	a.pages = 0
+	a.preview = nil
+	a.previewErr = ""
+	a.progress = 0
+	a.setStatus("已清空待转换文件", false)
 }
 
 func (a *app) settingsPanel(c *ui.Context) {
