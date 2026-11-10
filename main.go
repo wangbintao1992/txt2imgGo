@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	windowTitle    = "TXT 转图片"
-	leftPaneWidth  = 410
-	previewMaxW    = 620
-	previewMaxH    = 877
-	systemFontName = "系统默认"
+	windowTitle      = "TXT 转图片"
+	leftPaneWidth    = 410
+	leftContentWidth = 392
+	previewMaxW      = 620
+	previewMaxH      = 877
+	systemFontName   = "系统默认"
 )
 
 type app struct {
@@ -43,7 +44,10 @@ type app struct {
 	systemFont  FontRef
 	fontsLoaded bool
 
-	watermark string
+	watermark        string
+	watermarkSize    float64
+	watermarkOpacity float64
+	watermarkAngle   float64
 
 	page       int
 	pages      int
@@ -62,11 +66,14 @@ type app struct {
 func newApp() *app {
 	ref, _ := detectSystemFont()
 	a := &app{
-		splitParagraphs: true,
-		charsPerLine:    30,
-		fontName:        systemFontName,
-		systemFont:      ref,
-		status:          "拖入或选择 TXT 文件开始",
+		splitParagraphs:  true,
+		charsPerLine:     30,
+		fontName:         systemFontName,
+		systemFont:       ref,
+		watermarkSize:    46,
+		watermarkOpacity: 14,
+		watermarkAngle:   -30,
+		status:           "拖入或选择 TXT 文件开始",
 	}
 	a.setFontOptions([]fontOption{{Label: systemFontName, Ref: ref}})
 	return a
@@ -162,11 +169,13 @@ func (a *app) view(c *ui.Context) {
 		})
 
 		ui.Row(c).Fill().Gap(18).Children(func() {
-			ui.Column(c).Width(leftPaneWidth).FillHeight().Gap(12).Children(func() {
-				a.dropZone(c)
-				a.settingsPanel(c)
-				a.outputPanel(c)
-				a.generateButton(c)
+			ui.Scroll(c).Width(leftPaneWidth).FillHeight().Children(func() {
+				ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
+					a.dropZone(c)
+					a.settingsPanel(c)
+					a.outputPanel(c)
+					a.generateButton(c)
+				})
 			})
 			a.previewPanel(c)
 		})
@@ -175,7 +184,7 @@ func (a *app) view(c *ui.Context) {
 
 func (a *app) dropZone(c *ui.Context) {
 	t := c.Theme()
-	zone := ui.Column(c).Width(leftPaneWidth).Height(132).Padding(14).Gap(6).
+	zone := ui.Column(c).Width(leftContentWidth).Height(132).Padding(14).Gap(6).
 		Radius(12).Background(t.Surface).Border(1, t.Border).
 		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.generating)
 
@@ -207,7 +216,7 @@ func (a *app) dropZone(c *ui.Context) {
 
 func (a *app) settingsPanel(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).Width(leftPaneWidth).Padding(16).Gap(10).Radius(12).
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
 		ui.Text(c, "排版设置").FontSize(14).Bold()
 
@@ -250,7 +259,37 @@ func (a *app) settingsPanel(c *ui.Context) {
 		if beforeWatermark != a.watermark {
 			a.schedulePreview(220 * time.Millisecond)
 		}
-		ui.Text(c, "水印固定为 30° 斜向平铺，半透明显示").FontSize(11).TextColor(t.TextMuted)
+
+		beforeWatermarkSize := a.watermarkSize
+		a.settingRow(c, "水印字号", func() {
+			ui.NumberInput(c, &a.watermarkSize, 12, 160, 1).Width(92)
+			ui.Text(c, "px").FontSize(11).TextColor(t.TextMuted)
+			ui.Box(c).Grow(1)
+		})
+		if beforeWatermarkSize != a.watermarkSize {
+			a.schedulePreview(220 * time.Millisecond)
+		}
+
+		beforeOpacity := a.watermarkOpacity
+		a.settingRow(c, "透明度", func() {
+			ui.Slider(c, &a.watermarkOpacity, 5, 100).Step(1).Grow(1)
+			ui.Textf(c, "%.0f%%", a.watermarkOpacity).Width(42).FontSize(11).
+				TextColor(t.TextMuted).TextAlign(ui.End)
+		})
+		if beforeOpacity != a.watermarkOpacity {
+			a.schedulePreview(220 * time.Millisecond)
+		}
+
+		beforeAngle := a.watermarkAngle
+		a.settingRow(c, "倾斜角度", func() {
+			ui.Slider(c, &a.watermarkAngle, -75, 75).Step(1).Grow(1)
+			ui.Textf(c, "%.0f°", a.watermarkAngle).Width(42).FontSize(11).
+				TextColor(t.TextMuted).TextAlign(ui.End)
+		})
+		if beforeAngle != a.watermarkAngle {
+			a.schedulePreview(220 * time.Millisecond)
+		}
+		ui.Text(c, "负值向右上倾斜，正值向右下倾斜；水印为半透明平铺").FontSize(11).TextColor(t.TextMuted)
 	})
 }
 
@@ -263,7 +302,7 @@ func (a *app) settingRow(c *ui.Context, label string, fn func()) {
 
 func (a *app) outputPanel(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).Width(leftPaneWidth).Padding(16).Gap(10).Radius(12).
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
 		ui.Text(c, "输出位置").FontSize(14).Bold()
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -278,13 +317,13 @@ func (a *app) outputPanel(c *ui.Context) {
 
 func (a *app) generateButton(c *ui.Context) {
 	if a.generating {
-		ui.Progress(c, a.progress).Width(leftPaneWidth)
+		ui.Progress(c, a.progress).Width(leftContentWidth)
 	}
 	label := "开始生成图片"
 	if a.generating {
 		label = "正在生成…"
 	}
-	if ui.PrimaryButton(c, label).Width(leftPaneWidth).Height(44).
+	if ui.PrimaryButton(c, label).Width(leftContentWidth).Height(44).
 		Disabled(a.generating || strings.TrimSpace(a.text) == "").Clicked() {
 		a.generate()
 	}
@@ -338,12 +377,15 @@ func pageNumber(page int) int {
 }
 
 type previewSnapshot struct {
-	text      string
-	split     bool
-	chars     int
-	font      FontRef
-	watermark string
-	page      int
+	text             string
+	split            bool
+	chars            int
+	font             FontRef
+	watermark        string
+	watermarkSize    float64
+	watermarkOpacity float64
+	watermarkAngle   float64
+	page             int
 }
 
 func (a *app) makeSnapshot() (previewSnapshot, error) {
@@ -352,12 +394,15 @@ func (a *app) makeSnapshot() (previewSnapshot, error) {
 		return previewSnapshot{}, fmt.Errorf("未找到可用字体，请安装字体或在字体列表中选择")
 	}
 	return previewSnapshot{
-		text:      a.text,
-		split:     a.splitParagraphs,
-		chars:     int(math.Round(a.charsPerLine)),
-		font:      ref,
-		watermark: a.watermark,
-		page:      a.page,
+		text:             a.text,
+		split:            a.splitParagraphs,
+		chars:            int(math.Round(a.charsPerLine)),
+		font:             ref,
+		watermark:        a.watermark,
+		watermarkSize:    a.watermarkSize,
+		watermarkOpacity: a.watermarkOpacity / 100,
+		watermarkAngle:   a.watermarkAngle,
+		page:             a.page,
 	}, nil
 }
 
@@ -409,7 +454,13 @@ func (a *app) schedulePreview(delay time.Duration) {
 		if page < 0 {
 			page = 0
 		}
-		img, err := RenderPage(doc, page, RenderOptions{Font: snap.font, Watermark: snap.watermark})
+		img, err := RenderPage(doc, page, RenderOptions{
+			Font:             snap.font,
+			Watermark:        snap.watermark,
+			WatermarkSize:    snap.watermarkSize,
+			WatermarkOpacity: snap.watermarkOpacity,
+			WatermarkAngle:   snap.watermarkAngle,
+		})
 		if err != nil {
 			a.win.Update(func() {
 				if a.renderSeq.Load() != seq {
@@ -551,11 +602,14 @@ func (a *app) generate() {
 	}
 
 	snap := previewSnapshot{
-		text:      a.text,
-		split:     a.splitParagraphs,
-		chars:     int(math.Round(a.charsPerLine)),
-		font:      ref,
-		watermark: a.watermark,
+		text:             a.text,
+		split:            a.splitParagraphs,
+		chars:            int(math.Round(a.charsPerLine)),
+		font:             ref,
+		watermark:        a.watermark,
+		watermarkSize:    a.watermarkSize,
+		watermarkOpacity: a.watermarkOpacity / 100,
+		watermarkAngle:   a.watermarkAngle,
 	}
 	base := "txt2img"
 	if a.sourcePath != "" {
@@ -588,7 +642,13 @@ func (a *app) generate() {
 			digits = 3
 		}
 		for i := 0; i < doc.Pages(); i++ {
-			img, err := RenderPage(doc, i, RenderOptions{Font: snap.font, Watermark: snap.watermark})
+			img, err := RenderPage(doc, i, RenderOptions{
+				Font:             snap.font,
+				Watermark:        snap.watermark,
+				WatermarkSize:    snap.watermarkSize,
+				WatermarkOpacity: snap.watermarkOpacity,
+				WatermarkAngle:   snap.watermarkAngle,
+			})
 			if err != nil {
 				a.finishGenerateError(fmt.Sprintf("生成第 %d 页失败: %v", i+1, err))
 				return
@@ -622,6 +682,14 @@ func (a *app) generate() {
 			a.progress = 1
 			a.outputDir = out
 			a.setStatus(fmt.Sprintf("已生成 %d 张图片 · %s", doc.Pages(), out), false)
+		})
+		_, _ = mygo.Dialog.Message(mygo.MessageOptions{
+			Parent:  a.win,
+			Type:    mygo.MessageInfo,
+			Title:   "转换成功",
+			Message: fmt.Sprintf("已生成 %d 张图片", doc.Pages()),
+			Detail:  out,
+			Buttons: []string{"好"},
 		})
 	}()
 }

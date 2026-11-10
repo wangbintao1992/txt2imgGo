@@ -201,8 +201,11 @@ func wrapText(s string, n int) []string {
 }
 
 type RenderOptions struct {
-	Font      FontRef
-	Watermark string
+	Font             FontRef
+	Watermark        string
+	WatermarkSize    float64
+	WatermarkOpacity float64
+	WatermarkAngle   float64
 }
 
 func RenderPage(doc *Document, page int, opt RenderOptions) (*image.RGBA, error) {
@@ -221,9 +224,26 @@ func RenderPage(doc *Document, page int, opt RenderOptions) (*image.RGBA, error)
 	draw.Draw(img, img.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
 
 	if strings.TrimSpace(opt.Watermark) != "" {
-		wmFace, err := newFontFace(opt.Font, 46)
+		size := opt.WatermarkSize
+		if size <= 0 {
+			size = 46
+		}
+		if size < 12 {
+			size = 12
+		}
+		if size > 160 {
+			size = 160
+		}
+		opacity := opt.WatermarkOpacity
+		if opacity <= 0 {
+			opacity = 0.14
+		}
+		if opacity > 1 {
+			opacity = 1
+		}
+		wmFace, err := newFontFace(opt.Font, size)
 		if err == nil {
-			drawDiagonalWatermark(img, opt.Watermark, wmFace)
+			drawDiagonalWatermark(img, opt.Watermark, wmFace, opt.WatermarkAngle, opacity)
 			wmFace.Close()
 		}
 	}
@@ -269,9 +289,19 @@ func drawFooter(dst *image.RGBA, doc *Document, page int, ref FontRef) {
 	d.DrawString(label)
 }
 
-func drawDiagonalWatermark(dst *image.RGBA, text string, face font.Face) {
+func drawDiagonalWatermark(dst *image.RGBA, text string, face font.Face, angle, opacity float64) {
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return
+	}
+	if opacity <= 0 {
+		opacity = 0.14
+	}
+	if opacity > 1 {
+		opacity = 1
+	}
+	alpha := uint8(math.Round(opacity * 255))
+	if alpha == 0 {
 		return
 	}
 	runes := []rune(text)
@@ -287,13 +317,13 @@ func drawDiagonalWatermark(dst *image.RGBA, text string, face font.Face) {
 	tile := image.NewRGBA(image.Rect(0, 0, w+2*pad, ascent+descent+2*pad))
 	d := &font.Drawer{
 		Dst:  tile,
-		Src:  image.NewUniform(color.RGBA{R: 0x30, G: 0x38, B: 0x45, A: 34}),
+		Src:  image.NewUniform(color.NRGBA{R: 0x30, G: 0x38, B: 0x45, A: alpha}),
 		Face: face,
 		Dot:  fixed.P(pad, pad+ascent),
 	}
 	d.DrawString(text)
 
-	rotated := rotateRGBA(tile, -30)
+	rotated := rotateRGBA(tile, angle)
 	tw, th := rotated.Bounds().Dx(), rotated.Bounds().Dy()
 	stepX := int(float64(tw)*1.15) + 48
 	stepY := int(float64(th)*1.55) + 70
