@@ -1,0 +1,6 @@
+{
+  "name": "TXT2Img",
+  "identifier": "com.wangbintao.txt2img",
+  "version": "0.1.0",
+  "out": "build"
+}

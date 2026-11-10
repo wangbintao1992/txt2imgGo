@@ -1,0 +1,5 @@
+/build/
+/.mygo/
+/.idea/
+.DS_Store
+mygo_windows_*.syso
