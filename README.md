@@ -2,6 +2,10 @@
 
 使用 Go 与 [MyGo](https://github.com/egoist/mygo) 原生 UI 编写的桌面工具：把 TXT 文本按可配置排版转换成多张 PNG 图片，支持拖入文件、实时预览、系统字体选择与斜向平铺水印。
 
+## 界面预览
+
+![TXT 转图片界面](resources/img.png)
+
 ## 功能
 
 - 选择或拖入 `.txt` 文件
@@ -22,7 +26,7 @@ render.go     文本分行分页、字体栅格化、页面绘制、水印旋转
 fonts.go      系统字体探测、字体列表扫描、TTC/TTF/OTF 字体解析缓存
 textfile.go   TXT 编码识别与解码
 mygo.json     MyGo 应用配置
-resources/    MyGo 应用图标
+resources/    应用图标与界面截图
 ```
 
 - **UI**：MyGo `ui` 原生控件，纯 Go，无 WebView。
