@@ -51,6 +51,15 @@ type app struct {
 	watermarkOpacity float64
 	watermarkAngle   float64
 
+	antiWarp           bool
+	antiWarpStrength   float64
+	antiCrowd          bool
+	antiCrowdStrength  float64
+	antiStroke         bool
+	antiStrokeStrength float64
+	antiNoise          bool
+	antiNoiseStrength  float64
+
 	page       int
 	pages      int
 	preview    *ui.Bitmap
@@ -69,16 +78,20 @@ type app struct {
 func newApp() *app {
 	ref, _ := detectSystemFont()
 	a := &app{
-		splitParagraphs:  true,
-		charsPerLine:     30,
-		outputWidth:      pageWidth,
-		outputHeight:     pageHeight,
-		fontName:         systemFontName,
-		systemFont:       ref,
-		watermarkSize:    46,
-		watermarkOpacity: 14,
-		watermarkAngle:   -30,
-		status:           "拖入或选择 TXT 文件开始",
+		splitParagraphs:    true,
+		charsPerLine:       30,
+		outputWidth:        pageWidth,
+		outputHeight:       pageHeight,
+		fontName:           systemFontName,
+		systemFont:         ref,
+		watermarkSize:      46,
+		watermarkOpacity:   14,
+		watermarkAngle:     -30,
+		antiWarpStrength:   55,
+		antiCrowdStrength:  45,
+		antiStrokeStrength: 55,
+		antiNoiseStrength:  40,
+		status:             "拖入或选择 TXT 文件开始",
 	}
 	a.setFontOptions([]fontOption{{Label: systemFontName, Ref: ref}})
 	return a
@@ -173,12 +186,13 @@ func (a *app) view(c *ui.Context) {
 			ui.Text(c, a.status).FontSize(12).TextColor(statusColor).TextAlign(ui.End).MaxWidth(500)
 		})
 
-		ui.Row(c).Fill().Gap(18).Children(func() {
-			ui.Column(c).Width(leftPaneWidth).FillHeight().Gap(10).Children(func() {
-				ui.Scroll(c).Grow(1).Children(func() {
+		ui.Row(c).Fill().MinHeight(0).Gap(18).Children(func() {
+			ui.Column(c).Width(leftPaneWidth).FillHeight().MinHeight(0).Gap(10).Children(func() {
+				ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
 					ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
 						a.dropZone(c)
 						a.settingsPanel(c)
+						a.antiOCRPanel(c)
 						a.outputPanel(c)
 					})
 				})
@@ -329,6 +343,52 @@ func (a *app) settingRow(c *ui.Context, label string, fn func()) {
 	})
 }
 
+func (a *app) antiOCRPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
+		ui.Text(c, "反 OCR 增强").FontSize(14).Bold()
+		ui.Text(c, "提高 OCR 识别难度，仅作弱抑制").FontSize(11).TextColor(t.TextMuted)
+
+		before := a.antiOCROptions()
+		a.antiOCRRow(c, "形变扭曲", &a.antiWarp, &a.antiWarpStrength)
+		a.antiOCRRow(c, "字距挤压", &a.antiCrowd, &a.antiCrowdStrength)
+		a.antiOCRRow(c, "笔画重影", &a.antiStroke, &a.antiStrokeStrength)
+		a.antiOCRRow(c, "干扰纹理", &a.antiNoise, &a.antiNoiseStrength)
+		if before != a.antiOCROptions() {
+			a.schedulePreview(220 * time.Millisecond)
+		}
+	})
+}
+
+func (a *app) antiOCRRow(c *ui.Context, label string, on *bool, strength *float64) {
+	t := c.Theme()
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Switch(c, on)
+		ui.Text(c, label).Width(78).FontSize(13)
+		ui.Slider(c, strength, 0, 100).Step(1).Grow(1).Disabled(!*on)
+		ui.Textf(c, "%.0f", *strength).Width(30).FontSize(11).
+			TextColor(t.TextMuted).TextAlign(ui.End)
+	})
+}
+
+func (a *app) antiOCROptions() AntiOCR {
+	var opts AntiOCR
+	if a.antiWarp {
+		opts.Warp = a.antiWarpStrength
+	}
+	if a.antiCrowd {
+		opts.Crowd = a.antiCrowdStrength
+	}
+	if a.antiStroke {
+		opts.Stroke = a.antiStrokeStrength
+	}
+	if a.antiNoise {
+		opts.Noise = a.antiNoiseStrength
+	}
+	return opts
+}
+
 func (a *app) outputPanel(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
@@ -363,7 +423,7 @@ func (a *app) outputPanel(c *ui.Context) {
 
 func (a *app) actionButtons(c *ui.Context) {
 	if a.generating {
-		ui.Progress(c, a.progress).Width(leftContentWidth)
+		ui.Progress(c, a.progress).Width(leftContentWidth).Shrink(0)
 	}
 	imageLabel := "生成图片"
 	pdfLabel := "导出 PDF"
@@ -375,7 +435,7 @@ func (a *app) actionButtons(c *ui.Context) {
 		}
 	}
 	disabled := a.generating || strings.TrimSpace(a.text) == ""
-	ui.Row(c).Width(leftContentWidth).Gap(8).Children(func() {
+	ui.Row(c).Width(leftContentWidth).Gap(8).Shrink(0).Children(func() {
 		if ui.PrimaryButton(c, imageLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
 			a.generate()
 		}
@@ -443,6 +503,7 @@ type previewSnapshot struct {
 	watermarkSize    float64
 	watermarkOpacity float64
 	watermarkAngle   float64
+	anti             AntiOCR
 	page             int
 }
 
@@ -462,6 +523,7 @@ func (a *app) makeSnapshot() (previewSnapshot, error) {
 		watermarkSize:    a.watermarkSize,
 		watermarkOpacity: a.watermarkOpacity / 100,
 		watermarkAngle:   a.watermarkAngle,
+		anti:             a.antiOCROptions(),
 		page:             a.page,
 	}, nil
 }
@@ -520,6 +582,7 @@ func (a *app) schedulePreview(delay time.Duration) {
 			WatermarkSize:    snap.watermarkSize,
 			WatermarkOpacity: snap.watermarkOpacity,
 			WatermarkAngle:   snap.watermarkAngle,
+			AntiOCR:          snap.anti,
 		})
 		if err != nil {
 			a.win.Update(func() {
@@ -664,6 +727,7 @@ func (a *app) generate() {
 		watermarkSize:    a.watermarkSize,
 		watermarkOpacity: a.watermarkOpacity / 100,
 		watermarkAngle:   a.watermarkAngle,
+		anti:             a.antiOCROptions(),
 	}
 	base := a.documentBaseName()
 
@@ -894,6 +958,7 @@ func (s previewSnapshot) renderOptions() RenderOptions {
 		WatermarkSize:    s.watermarkSize,
 		WatermarkOpacity: s.watermarkOpacity,
 		WatermarkAngle:   s.watermarkAngle,
+		AntiOCR:          s.anti,
 	}
 }
 
