@@ -78,10 +78,11 @@ type app struct {
 	status    string
 	statusErr bool
 
-	generating   bool
-	exportingPDF bool
-	exportingZip bool
-	progress     float64
+	generating    bool
+	exportingPDF  bool
+	exportingWord bool
+	exportingZip  bool
+	progress      float64
 
 	renderSeq atomic.Uint64
 }
@@ -513,10 +514,14 @@ func (a *app) actionButtons(c *ui.Context) {
 	t := c.Theme()
 	imageLabel := "生成图片"
 	pdfLabel := "导出 PDF"
+	wordLabel := "导出 Word"
 	if a.generating {
-		if a.exportingPDF {
+		switch {
+		case a.exportingPDF:
 			pdfLabel = "正在导出…"
-		} else {
+		case a.exportingWord:
+			wordLabel = "正在导出…"
+		default:
 			imageLabel = "正在生成…"
 		}
 	}
@@ -533,6 +538,9 @@ func (a *app) actionButtons(c *ui.Context) {
 			}
 			if ui.Button(c, pdfLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
 				a.choosePDFExport()
+			}
+			if ui.Button(c, wordLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
+				a.chooseWordExport()
 			}
 		})
 	})
@@ -827,6 +835,7 @@ func (a *app) generate() {
 	a.renderSeq.Add(1)
 	a.generating = true
 	a.exportingPDF = false
+	a.exportingWord = false
 	a.exportingZip = false
 	a.progress = 0
 	a.statusErr = false
@@ -953,6 +962,7 @@ func (a *app) startPDFExport(path string) {
 	a.renderSeq.Add(1)
 	a.generating = true
 	a.exportingPDF = true
+	a.exportingWord = false
 	a.exportingZip = false
 	a.progress = 0
 	a.statusErr = false
@@ -1086,6 +1096,7 @@ func (a *app) startArchiveExport(path string) {
 	a.generating = true
 	a.exportingZip = true
 	a.exportingPDF = false
+	a.exportingWord = false
 	a.progress = 0
 	a.statusErr = false
 	a.setStatus("正在准备导出压缩包…", false)
@@ -1195,16 +1206,121 @@ func (a *app) startArchiveExport(path string) {
 	}()
 }
 
+func (a *app) chooseWordExport() {
+	if a.generating {
+		return
+	}
+	if strings.TrimSpace(a.text) == "" {
+		a.setStatus("请先选择 TXT 文件", true)
+		return
+	}
+	out := a.resolveOutputDir()
+	base := a.documentBaseName()
+	defaultPath := filepath.Join(out, base+".docx")
+	a.setStatus("请选择 Word 保存位置…", false)
+
+	go func() {
+		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+			Parent:            a.win,
+			Title:             "导出 Word",
+			DefaultPath:       defaultPath,
+			Filters:           []mygo.FileFilter{{Name: "Word 文档", Extensions: []string{"docx"}}},
+			CreateDirectories: true,
+		})
+		if err != nil {
+			a.win.Update(func() { a.setStatus("选择 Word 保存位置失败: "+err.Error(), true) })
+			return
+		}
+		if strings.TrimSpace(path) == "" {
+			a.win.Update(func() { a.setStatus("已取消导出 Word", false) })
+			return
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".docx") {
+			path += ".docx"
+		}
+		a.win.Update(func() { a.startWordExport(path) })
+	}()
+}
+
+func (a *app) startWordExport(path string) {
+	if a.generating {
+		return
+	}
+	text := a.text
+	split := a.splitParagraphs
+	title := a.documentBaseName()
+
+	a.renderSeq.Add(1)
+	a.generating = true
+	a.exportingWord = true
+	a.exportingPDF = false
+	a.exportingZip = false
+	a.progress = 0.2
+	a.statusErr = false
+	a.setStatus("正在生成 Word 文档…", false)
+	if a.win == nil {
+		a.generating = false
+		a.exportingWord = false
+		return
+	}
+
+	go func() {
+		dir := filepath.Dir(path)
+		if dir == "" {
+			dir = "."
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			a.finishGenerateError("创建 Word 目录失败: " + err.Error())
+			return
+		}
+		f, err := os.Create(path)
+		if err != nil {
+			a.finishGenerateError("创建 Word 文件失败: " + err.Error())
+			return
+		}
+		writeErr := WriteDOCX(f, text, split, title)
+		closeErr := f.Close()
+		if writeErr != nil {
+			_ = os.Remove(path)
+			a.finishGenerateError("导出 Word 失败: " + writeErr.Error())
+			return
+		}
+		if closeErr != nil {
+			_ = os.Remove(path)
+			a.finishGenerateError("保存 Word 失败: " + closeErr.Error())
+			return
+		}
+
+		a.win.Update(func() {
+			a.generating = false
+			a.exportingWord = false
+			a.progress = 1
+			a.outputDir = dir
+			a.setStatus("已导出 Word · "+path, false)
+		})
+		_, _ = mygo.Dialog.Message(mygo.MessageOptions{
+			Parent:  a.win,
+			Type:    mygo.MessageInfo,
+			Title:   "Word 导出成功",
+			Message: "已导出 Word 文档",
+			Detail:  path,
+			Buttons: []string{"好"},
+		})
+	}()
+}
+
 func (a *app) finishGenerateError(message string) {
 	if a.win == nil {
 		a.generating = false
 		a.exportingPDF = false
+		a.exportingWord = false
 		a.exportingZip = false
 		return
 	}
 	a.win.Update(func() {
 		a.generating = false
 		a.exportingPDF = false
+		a.exportingWord = false
 		a.exportingZip = false
 		a.progress = 0
 		a.setStatus(message, true)
