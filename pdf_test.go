@@ -19,7 +19,7 @@ func TestWritePDF(t *testing.T) {
 		WatermarkSize:    40,
 		WatermarkOpacity: 0.14,
 		WatermarkAngle:   -30,
-	}, nil)
+	}, PDFSecurity{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

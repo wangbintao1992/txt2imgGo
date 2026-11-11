@@ -4,3 +4,4 @@
 .DS_Store
 mygo_windows_*.syso
 /txt2imgGo
+*.txt

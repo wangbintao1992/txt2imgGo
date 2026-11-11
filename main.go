@@ -60,6 +60,16 @@ type app struct {
 	antiNoise          bool
 	antiNoiseStrength  float64
 
+	pdfOpenPassword  string
+	pdfOwnerPassword string
+	pdfNoPrint       bool
+	pdfNoCopy        bool
+	pdfNoExtract     bool
+
+	archiveFormat   string
+	archivePassword string
+	sevenZip        string
+
 	page       int
 	pages      int
 	preview    *ui.Bitmap
@@ -70,6 +80,7 @@ type app struct {
 
 	generating   bool
 	exportingPDF bool
+	exportingZip bool
 	progress     float64
 
 	renderSeq atomic.Uint64
@@ -91,8 +102,10 @@ func newApp() *app {
 		antiCrowdStrength:  45,
 		antiStrokeStrength: 55,
 		antiNoiseStrength:  40,
+		archiveFormat:      archiveFormatLabels[0],
 		status:             "拖入或选择 TXT 文件开始",
 	}
+	a.sevenZip = find7z()
 	a.setFontOptions([]fontOption{{Label: systemFontName, Ref: ref}})
 	return a
 }
@@ -194,6 +207,8 @@ func (a *app) view(c *ui.Context) {
 						a.settingsPanel(c)
 						a.antiOCRPanel(c)
 						a.outputPanel(c)
+						a.pdfSecurityPanel(c)
+						a.archivePanel(c)
 					})
 				})
 				a.actionButtons(c)
@@ -421,10 +436,81 @@ func (a *app) outputPanel(c *ui.Context) {
 	})
 }
 
-func (a *app) actionButtons(c *ui.Context) {
-	if a.generating {
-		ui.Progress(c, a.progress).Width(leftContentWidth).Shrink(0)
+func (a *app) pdfSecurityPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
+		ui.Text(c, "PDF 权限加密").FontSize(14).Bold()
+
+		a.settingRow(c, "打开密码", func() {
+			ui.TextInput(c, &a.pdfOpenPassword).Password().Placeholder("留空则打开无需密码").Grow(1)
+		})
+		a.settingRow(c, "权限密码", func() {
+			ui.TextInput(c, &a.pdfOwnerPassword).Password().Placeholder("用于修改权限").Grow(1)
+		})
+
+		a.pdfToggleRow(c, "禁止打印", &a.pdfNoPrint)
+		a.pdfToggleRow(c, "禁止复制文字", &a.pdfNoCopy)
+		a.pdfToggleRow(c, "禁止提取图片", &a.pdfNoExtract)
+
+		ui.Text(c, "设置任一密码后启用加密，仅对 PDF 导出有效").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "PDF 标准中复制文字与提取图片共用同一权限位，禁止其一即同时限制").FontSize(11).TextColor(t.TextMuted)
+	})
+}
+
+func (a *app) pdfToggleRow(c *ui.Context, label string, on *bool) {
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Switch(c, on)
+		ui.Text(c, label).FontSize(13)
+		ui.Box(c).Grow(1)
+	})
+}
+
+func (a *app) pdfSecurity() PDFSecurity {
+	return PDFSecurity{
+		OpenPassword:  a.pdfOpenPassword,
+		OwnerPassword: a.pdfOwnerPassword,
+		AllowPrint:    !a.pdfNoPrint,
+		AllowCopy:     !a.pdfNoCopy,
+		AllowExtract:  !a.pdfNoExtract,
 	}
+}
+
+func (a *app) archivePanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Disabled(a.generating).Children(func() {
+		ui.Text(c, "导出压缩包").FontSize(14).Bold()
+
+		a.settingRow(c, "压缩格式", func() {
+			ui.Select(c, &a.archiveFormat, archiveFormatLabels).Grow(1)
+		})
+		a.settingRow(c, "压缩密码", func() {
+			ui.TextInput(c, &a.archivePassword).Password().Placeholder("留空则不加密").Grow(1)
+		})
+		archiveLabel := "导出压缩包"
+		if a.exportingZip {
+			archiveLabel = "正在导出…"
+		}
+		if ui.Button(c, archiveLabel).Width(leftContentWidth - 32).Height(38).
+			Disabled(strings.TrimSpace(a.text) == "").Clicked() {
+			a.chooseArchiveExport()
+		}
+
+		ui.Text(c, "包含全部 PNG 图片；ZIP 使用内置 AES-256 加密").FontSize(11).TextColor(t.TextMuted)
+		if a.currentArchiveFormat() == format7z {
+			if a.sevenZip == "" {
+				ui.Text(c, "未检测到 7-Zip 命令（7zz / 7z / 7za），请先安装或改用 ZIP").FontSize(11).TextColor(t.Danger)
+			} else {
+				ui.Textf(c, "7z 使用 %s；设置密码时会同时加密文件头", filepath.Base(a.sevenZip)).
+					FontSize(11).TextColor(t.TextMuted)
+			}
+		}
+	})
+}
+
+func (a *app) actionButtons(c *ui.Context) {
+	t := c.Theme()
 	imageLabel := "生成图片"
 	pdfLabel := "导出 PDF"
 	if a.generating {
@@ -435,13 +521,20 @@ func (a *app) actionButtons(c *ui.Context) {
 		}
 	}
 	disabled := a.generating || strings.TrimSpace(a.text) == ""
-	ui.Row(c).Width(leftContentWidth).Gap(8).Shrink(0).Children(func() {
-		if ui.PrimaryButton(c, imageLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
-			a.generate()
-		}
-		if ui.Button(c, pdfLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
-			a.choosePDFExport()
-		}
+	ui.Column(c).Width(leftContentWidth).Gap(8).Shrink(0).Children(func() {
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Progress(c, a.progress).Grow(1)
+			ui.Textf(c, "%.0f%%", a.progress*100).Width(40).FontSize(11).
+				TextColor(t.TextMuted).TextAlign(ui.End)
+		})
+		ui.Row(c).Width(leftContentWidth).Gap(8).Children(func() {
+			if ui.PrimaryButton(c, imageLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
+				a.generate()
+			}
+			if ui.Button(c, pdfLabel).Grow(1).Height(42).Disabled(disabled).Clicked() {
+				a.choosePDFExport()
+			}
+		})
 	})
 }
 
@@ -734,6 +827,7 @@ func (a *app) generate() {
 	a.renderSeq.Add(1)
 	a.generating = true
 	a.exportingPDF = false
+	a.exportingZip = false
 	a.progress = 0
 	a.statusErr = false
 	a.setStatus("正在准备生成…", false)
@@ -813,6 +907,11 @@ func (a *app) choosePDFExport() {
 		a.setStatus("请先选择 TXT 文件", true)
 		return
 	}
+	sec := a.pdfSecurity()
+	if !sec.Enabled() && sec.Restricted() {
+		a.setStatus("已勾选禁止项，请先设置打开密码或权限密码", true)
+		return
+	}
 	out := a.resolveOutputDir()
 	base := a.documentBaseName()
 	defaultPath := filepath.Join(out, base+".pdf")
@@ -850,9 +949,11 @@ func (a *app) startPDFExport(path string) {
 		a.setStatus(err.Error(), true)
 		return
 	}
+	sec := a.pdfSecurity()
 	a.renderSeq.Add(1)
 	a.generating = true
 	a.exportingPDF = true
+	a.exportingZip = false
 	a.progress = 0
 	a.statusErr = false
 	a.setStatus("正在准备导出 PDF…", false)
@@ -881,7 +982,7 @@ func (a *app) startPDFExport(path string) {
 			a.finishGenerateError("创建 PDF 失败: " + err.Error())
 			return
 		}
-		err = WritePDF(f, doc, snap.renderOptions(), func(done, total int) {
+		err = WritePDF(f, doc, snap.renderOptions(), sec, func(done, total int) {
 			a.win.Update(func() {
 				a.progress = float64(done) / float64(total)
 				a.status = fmt.Sprintf("正在导出 PDF %d / %d", done, total)
@@ -917,15 +1018,194 @@ func (a *app) startPDFExport(path string) {
 	}()
 }
 
+func (a *app) chooseArchiveExport() {
+	if a.generating {
+		return
+	}
+	if strings.TrimSpace(a.text) == "" {
+		a.setStatus("请先选择 TXT 文件", true)
+		return
+	}
+	format := a.currentArchiveFormat()
+	if format == format7z && a.sevenZip == "" {
+		a.setStatus("未找到 7-Zip 命令，请先安装 7-Zip 或改用 ZIP 格式", true)
+		return
+	}
+	out := a.resolveOutputDir()
+	base := a.documentBaseName()
+	ext := archiveExtension(format)
+	defaultPath := filepath.Join(out, base+ext)
+	name := "ZIP 压缩包"
+	if format == format7z {
+		name = "7z 压缩包"
+	}
+	a.setStatus("请选择压缩包保存位置…", false)
+
+	go func() {
+		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+			Parent:            a.win,
+			Title:             "导出压缩包",
+			DefaultPath:       defaultPath,
+			Filters:           []mygo.FileFilter{{Name: name, Extensions: []string{strings.TrimPrefix(ext, ".")}}},
+			CreateDirectories: true,
+		})
+		if err != nil {
+			a.win.Update(func() { a.setStatus("选择压缩包保存位置失败: "+err.Error(), true) })
+			return
+		}
+		if strings.TrimSpace(path) == "" {
+			a.win.Update(func() { a.setStatus("已取消导出压缩包", false) })
+			return
+		}
+		if !strings.EqualFold(filepath.Ext(path), ext) {
+			path += ext
+		}
+		a.win.Update(func() { a.startArchiveExport(path) })
+	}()
+}
+
+func (a *app) startArchiveExport(path string) {
+	if a.generating {
+		return
+	}
+	snap, err := a.makeSnapshot()
+	if err != nil {
+		a.setStatus(err.Error(), true)
+		return
+	}
+	format := a.currentArchiveFormat()
+	password := a.archivePassword
+	bin := a.sevenZip
+	if format == format7z && bin == "" {
+		a.setStatus("未找到 7-Zip 命令，请先安装 7-Zip 或改用 ZIP 格式", true)
+		return
+	}
+	base := a.documentBaseName()
+
+	a.renderSeq.Add(1)
+	a.generating = true
+	a.exportingZip = true
+	a.exportingPDF = false
+	a.progress = 0
+	a.statusErr = false
+	a.setStatus("正在准备导出压缩包…", false)
+	if a.win == nil {
+		a.generating = false
+		a.exportingZip = false
+		return
+	}
+
+	go func() {
+		doc := BuildDocument(snap.text, snap.split, snap.chars, snap.width, snap.height)
+		if doc.Pages() == 0 {
+			a.finishGenerateError("没有可导出的内容")
+			return
+		}
+
+		tmp, err := os.MkdirTemp("", "txt2img-archive-*")
+		if err != nil {
+			a.finishGenerateError("创建临时目录失败: " + err.Error())
+			return
+		}
+		defer os.RemoveAll(tmp)
+
+		digits := len(strconv.Itoa(doc.Pages()))
+		if digits < 3 {
+			digits = 3
+		}
+		files := make([]string, 0, doc.Pages())
+		for i := 0; i < doc.Pages(); i++ {
+			img, err := RenderPage(doc, i, snap.renderOptions())
+			if err != nil {
+				a.finishGenerateError(fmt.Sprintf("生成第 %d 页失败: %v", i+1, err))
+				return
+			}
+			name := filepath.Join(tmp, fmt.Sprintf("%s_%0*d.png", base, digits, i+1))
+			f, err := os.Create(name)
+			if err != nil {
+				a.finishGenerateError("创建图片失败: " + err.Error())
+				return
+			}
+			encodeErr := png.Encode(f, img)
+			closeErr := f.Close()
+			if encodeErr != nil {
+				a.finishGenerateError("写入图片失败: " + encodeErr.Error())
+				return
+			}
+			if closeErr != nil {
+				a.finishGenerateError("保存图片失败: " + closeErr.Error())
+				return
+			}
+			files = append(files, name)
+			done := i + 1
+			a.win.Update(func() {
+				a.progress = 0.7 * float64(done) / float64(doc.Pages())
+				a.status = fmt.Sprintf("正在渲染压缩包内容 %d / %d", done, doc.Pages())
+			})
+		}
+
+		dir := filepath.Dir(path)
+		if dir == "" {
+			dir = "."
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			a.finishGenerateError("创建压缩包目录失败: " + err.Error())
+			return
+		}
+
+		switch format {
+		case format7z:
+			a.win.Update(func() { a.status = "正在压缩为 7z…" })
+			err = write7zArchive(bin, path, files, password, func(done, total int) {
+				a.win.Update(func() {
+					a.progress = 1
+					a.status = "正在写入 7z…"
+				})
+			})
+		default:
+			a.win.Update(func() { a.status = "正在压缩为 ZIP…" })
+			err = writeZIPArchive(path, files, password, func(done, total int) {
+				a.win.Update(func() {
+					a.progress = 0.7 + 0.3*float64(done)/float64(total)
+					a.status = fmt.Sprintf("正在压缩 %d / %d", done, total)
+				})
+			})
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			a.finishGenerateError("导出压缩包失败: " + err.Error())
+			return
+		}
+
+		a.win.Update(func() {
+			a.generating = false
+			a.exportingZip = false
+			a.progress = 1
+			a.outputDir = dir
+			a.setStatus(fmt.Sprintf("已导出 %d 张图片压缩包 · %s", doc.Pages(), path), false)
+		})
+		_, _ = mygo.Dialog.Message(mygo.MessageOptions{
+			Parent:  a.win,
+			Type:    mygo.MessageInfo,
+			Title:   "压缩包导出成功",
+			Message: fmt.Sprintf("已打包 %d 张图片", doc.Pages()),
+			Detail:  path,
+			Buttons: []string{"好"},
+		})
+	}()
+}
+
 func (a *app) finishGenerateError(message string) {
 	if a.win == nil {
 		a.generating = false
 		a.exportingPDF = false
+		a.exportingZip = false
 		return
 	}
 	a.win.Update(func() {
 		a.generating = false
 		a.exportingPDF = false
+		a.exportingZip = false
 		a.progress = 0
 		a.setStatus(message, true)
 	})

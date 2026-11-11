@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"io"
@@ -11,9 +13,14 @@ import (
 
 const pdfDPI = 150
 
-func WritePDF(w io.Writer, doc *Document, opt RenderOptions, progress func(done, total int)) error {
+func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, progress func(done, total int)) error {
 	if doc.Pages() == 0 {
 		return fmt.Errorf("没有可导出的内容")
+	}
+
+	enc, err := newPDFEncryptor(sec)
+	if err != nil {
+		return err
 	}
 
 	p := &pdfWriter{w: w, offsets: make(map[int]int64)}
@@ -48,13 +55,20 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, progress func(done,
 		imageHeader := fmt.Sprintf(
 			"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n",
 			doc.PageWidth, doc.PageHeight, len(compressed))
+		if enc != nil {
+			compressed = enc.Encrypt(imageID, 0, compressed)
+		}
 		if err := p.objectStream(imageID, imageHeader, compressed); err != nil {
 			return err
 		}
 
 		content := fmt.Sprintf("q\n%.3f 0 0 %.3f 0 0 cm\n/Im0 Do\nQ\n", pagePointsW, pagePointsH)
 		contentHeader := fmt.Sprintf("<< /Length %d >>\nstream\n", len(content))
-		if err := p.objectStream(contentID, contentHeader, []byte(content)); err != nil {
+		contentBytes := []byte(content)
+		if enc != nil {
+			contentBytes = enc.Encrypt(contentID, 0, contentBytes)
+		}
+		if err := p.objectStream(contentID, contentHeader, contentBytes); err != nil {
 			return err
 		}
 
@@ -80,6 +94,15 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, progress func(done,
 	}
 
 	maxID := 2 + doc.Pages()*3
+	encID := 0
+	if enc != nil {
+		encID = maxID + 1
+		if err := p.object(encID, enc.DictBody()); err != nil {
+			return err
+		}
+		maxID = encID
+	}
+
 	xrefOffset := p.n
 	if err := p.writeString(fmt.Sprintf("xref\n0 %d\n", maxID+1)); err != nil {
 		return err
@@ -93,7 +116,19 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, progress func(done,
 			return err
 		}
 	}
-	return p.writeString(fmt.Sprintf("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", maxID+1, xrefOffset))
+
+	trailer := fmt.Sprintf("trailer\n<< /Size %d /Root 1 0 R", maxID+1)
+	if enc != nil {
+		trailer += fmt.Sprintf(" /Encrypt %d 0 R /ID [<%s> <%s>]",
+			encID, enc.IDHex(), enc.IDHex())
+	} else {
+		id := make([]byte, 16)
+		_, _ = rand.Read(id)
+		hexID := hex.EncodeToString(id)
+		trailer += fmt.Sprintf(" /ID [<%s> <%s>]", hexID, hexID)
+	}
+	trailer += fmt.Sprintf(" >>\nstartxref\n%d\n%%%%EOF\n", xrefOffset)
+	return p.writeString(trailer)
 }
 
 type pdfWriter struct {
