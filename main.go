@@ -1246,9 +1246,15 @@ func (a *app) startWordExport(path string) {
 	if a.generating {
 		return
 	}
-	text := a.text
-	split := a.splitParagraphs
+	snap, err := a.makeSnapshot()
+	if err != nil {
+		a.setStatus(err.Error(), true)
+		return
+	}
+	text := snap.text
+	split := snap.split
 	title := a.documentBaseName()
+	renderOpt := snap.renderOptions()
 
 	a.renderSeq.Add(1)
 	a.generating = true
@@ -1278,7 +1284,7 @@ func (a *app) startWordExport(path string) {
 			a.finishGenerateError("创建 Word 文件失败: " + err.Error())
 			return
 		}
-		writeErr := WriteDOCX(f, text, split, title)
+		writeErr := WriteDOCX(f, text, split, title, renderOpt)
 		closeErr := f.Close()
 		if writeErr != nil {
 			_ = os.Remove(path)
