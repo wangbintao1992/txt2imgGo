@@ -8,3 +8,4 @@ mygo_windows_*.syso
 /frontend/node_modules/
 /frontend/dist/
 /frontend/.vite/
+/img/
