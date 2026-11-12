@@ -2,5 +2,10 @@
   "name": "TXT2Img",
   "identifier": "com.wangbintao.txt2img",
   "version": "0.1.0",
-  "out": "build"
+  "out": "build",
+  "devUrl": "http://localhost:5173",
+  "devCommand": "npm run --prefix frontend dev",
+  "buildCommand": "npm run --prefix frontend build",
+  "frontendDist": "frontend/dist",
+  "bindings": "frontend/src/mygo.ts"
 }

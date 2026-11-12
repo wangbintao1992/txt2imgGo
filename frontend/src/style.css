@@ -1,0 +1,141 @@
+:root {
+  color-scheme: light;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", system-ui, sans-serif;
+  font-size: 14px;
+  color: #1f2430;
+  background: #f4f5f7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: #f4f5f7;
+}
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+  padding: 40px;
+}
+
+.head h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.head p {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e3e6eb;
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.primary {
+  height: 40px;
+  border: 0;
+  border-radius: 8px;
+  background: #2f6fed;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.primary:hover {
+  background: #2a63d4;
+}
+
+.primary:disabled {
+  background: #9db8f2;
+  cursor: default;
+}
+
+.status {
+  min-height: 20px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.status.error {
+  color: #c0392b;
+}
+
+.bar {
+  height: 6px;
+  border-radius: 999px;
+  background: #edf0f4;
+  overflow: hidden;
+}
+
+.bar > div {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: #2f6fed;
+  transition: width 180ms ease;
+}
+
+.detail {
+  min-height: 18px;
+  font-size: 12px;
+  color: #6b7280;
+  word-break: break-all;
+}
+
+.foot {
+  text-align: center;
+  font-size: 12px;
+  color: #9aa1ad;
+}
+
+/* 渲染舞台：留在视口内，pagedjs 才能在 WKWebView 里正确测量；上面盖一层遮罩。 */
+.render-stage {
+  position: static;
+  width: 210mm;
+  background: #ffffff;
+  pointer-events: none;
+}
+
+.render-cover {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f4f5f7;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.render-source {
+  width: 170mm;
+}
+
+.render-pages {
+  width: 210mm;
+}

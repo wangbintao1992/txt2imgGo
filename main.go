@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"image/png"
 	"log"
@@ -69,6 +70,16 @@ type app struct {
 	archiveFormat   string
 	archivePassword string
 	sevenZip        string
+
+	mode    int
+	sideTab int
+
+	wordView       *mygo.WebView
+	wordViewErr    string
+	convertingWord bool
+	wordSource     string
+	wordOutputDir  string
+	wordSeq        atomic.Uint64
 
 	page       int
 	pages      int
@@ -191,31 +202,63 @@ func (a *app) view(c *ui.Context) {
 	}
 
 	ui.Column(c).Fill().Padding(20).Gap(14).Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(16).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
-				ui.Text(c, windowTitle).FontSize(26).Bold()
-				ui.Text(c, "纯 Go 文本排版 · 拖入文件 · 实时预览 · 斜向水印").FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, windowTitle).FontSize(24).Bold()
+				ui.Text(c, "文本与 Word 转图片").FontSize(12).TextColor(t.TextMuted)
 			})
+			before := a.mode
+			ui.Tabs(c, &a.mode, "文本转图片", "Word 转图片").Width(280)
+			if before != a.mode {
+				if a.mode == 1 {
+					a.initWordView()
+				}
+				a.statusErr = false
+			}
 			ui.Box(c).Grow(1)
-			ui.Text(c, a.status).FontSize(12).TextColor(statusColor).TextAlign(ui.End).MaxWidth(500)
+			ui.Text(c, a.status).FontSize(12).TextColor(statusColor).TextAlign(ui.End).MaxWidth(520)
 		})
 
 		ui.Row(c).Fill().MinHeight(0).Gap(18).Children(func() {
-			ui.Column(c).Width(leftPaneWidth).FillHeight().MinHeight(0).Gap(10).Children(func() {
-				ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
-					ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
-						a.dropZone(c)
-						a.settingsPanel(c)
-						a.antiOCRPanel(c)
-						a.outputPanel(c)
-						a.pdfSecurityPanel(c)
-						a.archivePanel(c)
-					})
-				})
-				a.actionButtons(c)
-			})
-			a.previewPanel(c)
+			a.sidebar(c)
+			if a.mode == 1 {
+				a.wordViewPanel(c)
+			} else {
+				a.previewPanel(c)
+			}
 		})
+	})
+}
+
+func (a *app) sidebar(c *ui.Context) {
+	ui.Column(c).Width(leftPaneWidth).FillHeight().MinHeight(0).Gap(10).Children(func() {
+		if a.mode == 1 {
+			ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
+				ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
+					a.wordPickPanel(c)
+					a.wordResultPanel(c)
+					a.wordTipsPanel(c)
+				})
+			})
+			return
+		}
+		ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
+			ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
+				a.dropZone(c)
+				ui.Tabs(c, &a.sideTab, "排版", "增强", "导出").Width(leftContentWidth)
+				switch a.sideTab {
+				case 1:
+					a.antiOCRPanel(c)
+				case 2:
+					a.outputPanel(c)
+					a.pdfSecurityPanel(c)
+					a.archivePanel(c)
+				default:
+					a.settingsPanel(c)
+				}
+			})
+		})
+		a.actionButtons(c)
 	})
 }
 
@@ -543,6 +586,262 @@ func (a *app) actionButtons(c *ui.Context) {
 				a.chooseWordExport()
 			}
 		})
+	})
+}
+
+func (a *app) wordPickPanel(c *ui.Context) {
+	t := c.Theme()
+	zone := ui.Column(c).Width(leftContentWidth).Height(176).Padding(14).Gap(8).
+		Radius(12).Background(t.Surface).Border(1, t.Border).
+		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.generating)
+
+	if files := zone.DroppedFiles(); files != nil {
+		a.handleWordDrop(files)
+	}
+	if zone.FileDragOver() {
+		zone.Border(2, t.Accent)
+	}
+
+	zone.Children(func() {
+		ui.Text(c, "拖入 Word 文件").FontSize(18).Bold()
+		ui.Text(c, ".docx · 自动按 A4 分页，一页一张 PNG").FontSize(11).TextColor(t.TextMuted)
+		if ui.Button(c, "选择 Word 文件").Width(180).Height(34).Clicked() {
+			a.chooseWordFile()
+		}
+		if a.wordSource != "" {
+			ui.Text(c, filepath.Base(a.wordSource)).FontSize(12).MaxLines(1)
+		}
+	})
+}
+
+func (a *app) wordResultPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(8).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Text(c, "输出").FontSize(14).Bold()
+		if a.wordOutputDir != "" {
+			ui.Text(c, a.wordOutputDir).FontSize(12).TextColor(t.TextMuted).MaxLines(3)
+			ui.Textf(c, "已保存 %d 张 PNG", a.pages).FontSize(11).TextColor(t.TextMuted)
+		} else {
+			ui.Text(c, "保存到 Word 文件同目录的 <文件名>_images 文件夹").FontSize(12).TextColor(t.TextMuted)
+		}
+	})
+}
+
+func (a *app) wordTipsPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(6).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Text(c, "说明").FontSize(14).Bold()
+		ui.Text(c, "· A4 页面，20mm 页边距，2x 分辨率").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 表格行不拆，短段不拆，长段控制孤行寡行").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 整体超时 30 秒，只输出 PNG，不生成 PDF").FontSize(11).TextColor(t.TextMuted)
+	})
+}
+
+func (a *app) initWordView() {
+	if a.wordView != nil || a.win == nil {
+		return
+	}
+	v, err := a.win.NewWebView(mygo.WebViewOptions{
+		URL:             "/word",
+		BackgroundColor: "#ffffff",
+	})
+	if err != nil {
+		a.wordViewErr = "打开 Word 转换页失败: " + err.Error()
+		a.setStatus(a.wordViewErr, true)
+		return
+	}
+	v.Page().OnDidFailLoad(func(e *mygo.LoadError) {
+		a.wordViewErr = "加载 Word 转换页失败: " + e.Description
+		a.setStatus(a.wordViewErr, true)
+	})
+	v.Page().OnDidFinishLoad(func() {
+		a.wordViewErr = ""
+	})
+	a.wordView = v
+}
+
+func (a *app) wordViewPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Grow(1).FillHeight().Padding(12).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+			ui.Text(c, "转换进度").FontSize(14).Bold()
+			ui.Text(c, "A4 · 20mm · 2x").FontSize(11).TextColor(t.TextMuted)
+			ui.Box(c).Grow(1)
+		})
+		if a.wordViewErr != "" {
+			ui.Text(c, a.wordViewErr).FontSize(12).TextColor(t.Danger).MaxWidth(520)
+			ui.Text(c, "开发时使用 go tool mygo dev，打包后使用 go tool mygo build。").FontSize(11).TextColor(t.TextMuted)
+		} else if a.wordView != nil {
+			ui.WebView(c, a.wordView).Grow(1).Radius(8)
+		}
+	})
+}
+
+func (a *app) handleWordDrop(files []string) {
+	if a.generating {
+		return
+	}
+	for _, file := range files {
+		if strings.EqualFold(filepath.Ext(file), ".docx") {
+			a.startWordConversion(file)
+			return
+		}
+	}
+	a.setStatus("请拖入 .docx 文件", true)
+}
+
+func (a *app) chooseWordFile() {
+	if a.generating {
+		return
+	}
+	go func() {
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+			Parent:  a.win,
+			Title:   "选择 Word 文档",
+			Filters: []mygo.FileFilter{{Name: "Word 文档", Extensions: []string{"docx"}}},
+		})
+		if err != nil {
+			a.win.Update(func() { a.setStatus("选择 Word 失败: "+err.Error(), true) })
+			return
+		}
+		if len(paths) == 0 {
+			return
+		}
+		a.win.Update(func() { a.startWordConversion(paths[0]) })
+	}()
+}
+
+func (a *app) startWordConversion(path string) {
+	if a.generating {
+		return
+	}
+	a.initWordView()
+	if a.wordView == nil {
+		return
+	}
+	if a.wordViewErr != "" {
+		a.setStatus(a.wordViewErr, true)
+		return
+	}
+	seq := a.wordSeq.Add(1)
+	a.mode = 1
+	a.generating = true
+	a.convertingWord = true
+	a.progress = 0.03
+	a.statusErr = false
+	a.wordSource = path
+	a.wordOutputDir = ""
+	log.Printf("[word] 选择文件 %s", path)
+	a.setStatus("正在读取 Word…", false)
+	if wordService != nil {
+		wordService.setSource(path)
+	}
+
+	go func() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			a.finishWordError("读取 Word 失败: " + err.Error())
+			return
+		}
+		encoded := base64.StdEncoding.EncodeToString(data)
+		a.win.Update(func() {
+			if a.wordSeq.Load() != seq || !a.convertingWord {
+				return
+			}
+			a.progress = 0.06
+			a.setStatus("正在解析 Word…", false)
+			log.Printf("[word] 发送到渲染页 %s（%d 字节 base64）", filepath.Base(path), len(encoded))
+			if err := WordDocx.Emit(a.win, WordDocxPayload{
+				Name: filepath.Base(path),
+				Data: encoded,
+			}); err != nil {
+				a.finishWordError("发送到渲染页失败: " + err.Error())
+			}
+		})
+	}()
+
+	time.AfterFunc(3*time.Minute, func() {
+		if a.wordSeq.Load() != seq {
+			return
+		}
+		a.win.Update(func() {
+			if a.convertingWord {
+				log.Printf("[word] 超时未收到渲染结果")
+				a.finishWordError("Word 转换超时")
+			}
+		})
+	})
+}
+
+func (a *app) reportWord(stage string, done, total int) {
+	if a.win == nil {
+		return
+	}
+	a.win.Update(func() {
+		if !a.convertingWord {
+			return
+		}
+		a.statusErr = false
+		switch stage {
+		case "parse":
+			a.progress = 0.08
+			a.status = "正在解析 Word…"
+		case "paginate":
+			if total > 0 {
+				ratio := float64(done) / float64(total)
+				if ratio > 1 {
+					ratio = 1
+				}
+				a.progress = 0.10 + 0.30*ratio
+				a.status = fmt.Sprintf("正在分页 %d / %d 页", done, total)
+			} else {
+				a.progress = 0.10
+				a.status = "正在按 A4 分页…"
+			}
+		case "capture":
+			if total > 0 {
+				a.progress = 0.40 + 0.58*float64(done)/float64(total)
+				a.status = fmt.Sprintf("正在截图 %d / %d", done, total)
+			}
+		case "save":
+			a.progress = 0.94
+			a.status = "正在保存图片…"
+		}
+	})
+}
+
+func (a *app) finishWordError(message string) {
+	if a.win == nil {
+		a.generating = false
+		a.convertingWord = false
+		return
+	}
+	a.win.Update(func() {
+		a.generating = false
+		a.convertingWord = false
+		a.progress = 0
+		log.Printf("[word] 失败：%s", message)
+		a.setStatus(message, true)
+	})
+}
+
+func (a *app) finishWordSuccess(dir string, count int) {
+	if a.win == nil {
+		a.generating = false
+		a.convertingWord = false
+		return
+	}
+	a.win.Update(func() {
+		a.generating = false
+		a.convertingWord = false
+		a.progress = 1
+		a.wordOutputDir = dir
+		a.pages = count
+		log.Printf("[word] 完成：%d 张，%s", count, dir)
+		a.setStatus(fmt.Sprintf("已保存 %d 张 PNG · %s", count, dir), false)
 	})
 }
 
@@ -1404,8 +1703,12 @@ func safeFileBase(name string) string {
 	return out
 }
 
+var wordService *WordRender
+
 func main() {
 	a := newApp()
+	wordService = &WordRender{app: a}
+	mygo.Bind(wordService)
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     windowTitle,
@@ -1417,6 +1720,7 @@ func main() {
 			Content:   ui.View(a.view),
 		})
 		a.startFontScan()
+		a.initWordView()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

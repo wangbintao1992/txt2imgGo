@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>renderer self test</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 20px; }
+      #log { white-space: pre-wrap; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <input id="file" type="file" accept=".docx" />
+    <pre id="log">choose a docx</pre>
+    <script type="module">
+      import { renderDocxToPngs } from "./src/renderDocxToPngs.ts";
+
+      const input = document.querySelector("#file");
+      const log = document.querySelector("#log");
+      window.__done = false;
+
+      input.addEventListener("change", async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        log.textContent = "rendering…";
+        try {
+          const buffer = await file.arrayBuffer();
+          const pages = await renderDocxToPngs(buffer, (p) => {
+            window.__progress = p;
+            log.textContent = JSON.stringify(p);
+          });
+          window.__pages = pages;
+          window.__result = {
+            count: pages.length,
+            sizes: pages.map((p) => p.length),
+            head: pages.slice(0, 3).map((p) => p.slice(0, 16)),
+          };
+          log.textContent = JSON.stringify(window.__result);
+        } catch (error) {
+          window.__pages = pages;
+          window.__result = { error: String(error) };
+          log.textContent = String(error);
+        }
+        window.__done = true;
+      });
+    </script>
+  </body>
+</html>

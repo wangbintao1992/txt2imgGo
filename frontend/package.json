@@ -1,0 +1,21 @@
+{
+  "name": "txt2img-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "docx-preview": "^0.4.1",
+    "html2canvas": "^1.4.1",
+    "mygo-runtime": "^0.8.3",
+    "pagedjs": "^0.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

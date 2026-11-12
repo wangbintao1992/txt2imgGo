@@ -5,3 +5,6 @@
 mygo_windows_*.syso
 /txt2imgGo
 *.txt
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
