@@ -17,6 +17,17 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, pr
 	if doc.Pages() == 0 {
 		return fmt.Errorf("没有可导出的内容")
 	}
+	return writeImagePagesPDF(w, doc.Pages(), pdfDPI, func(i int) (*image.RGBA, error) {
+		return RenderPage(doc, i, opt)
+	}, sec, progress)
+}
+
+// writeImagePagesPDF 把每页一张图写成 PDF。render 按 0 起始的页序返回图片，
+// dpi 用来把像素尺寸换算成 PDF 点。
+func writeImagePagesPDF(w io.Writer, total int, dpi float64, render func(i int) (*image.RGBA, error), sec PDFSecurity, progress func(done, total int)) error {
+	if total <= 0 {
+		return fmt.Errorf("没有可导出的页面")
+	}
 
 	enc, err := newPDFEncryptor(sec)
 	if err != nil {
@@ -32,15 +43,17 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, pr
 		return err
 	}
 
-	pagePointsW := float64(doc.PageWidth) * 72 / pdfDPI
-	pagePointsH := float64(doc.PageHeight) * 72 / pdfDPI
-	pageIDs := make([]int, doc.Pages())
+	pageIDs := make([]int, total)
 
-	for i := 0; i < doc.Pages(); i++ {
-		img, err := RenderPage(doc, i, opt)
+	for i := 0; i < total; i++ {
+		img, err := render(i)
 		if err != nil {
 			return err
 		}
+		bounds := img.Bounds()
+		pagePointsW := float64(bounds.Dx()) * 72 / dpi
+		pagePointsH := float64(bounds.Dy()) * 72 / dpi
+
 		rgb := imageToRGB(img)
 		compressed, err := compressBytes(rgb)
 		if err != nil {
@@ -54,7 +67,7 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, pr
 
 		imageHeader := fmt.Sprintf(
 			"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n",
-			doc.PageWidth, doc.PageHeight, len(compressed))
+			bounds.Dx(), bounds.Dy(), len(compressed))
 		if enc != nil {
 			compressed = enc.Encrypt(imageID, 0, compressed)
 		}
@@ -80,7 +93,7 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, pr
 		}
 
 		if progress != nil {
-			progress(i+1, doc.Pages())
+			progress(i+1, total)
 		}
 	}
 
@@ -93,7 +106,7 @@ func WritePDF(w io.Writer, doc *Document, opt RenderOptions, sec PDFSecurity, pr
 		return err
 	}
 
-	maxID := 2 + doc.Pages()*3
+	maxID := 2 + total*3
 	encID := 0
 	if enc != nil {
 		encID = maxID + 1

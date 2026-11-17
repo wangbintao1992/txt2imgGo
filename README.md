@@ -22,7 +22,8 @@
 - PDF 权限加密：可设打开密码与权限密码，禁止打印、复制文字、提取图片
 - 导出压缩包：可打包全部 PNG，ZIP 内置 AES-256 加密，7z 支持密码与文件头加密
 - 支持导出 Word（`.docx`），按当前段落设置生成，标题加粗、首行缩进
-- Word 转图片：左侧拖入或选择 `.docx`，WebView 内按 A4 分页，逐页导出 PNG，不生成 PDF
+- Word 转 PDF：左侧拖入或选择 `.docx`，用 LibreOffice 转 PDF 后逐页渲染并叠加斜向平铺水印，再写出带水印的 PDF
+- PDF 转图片：拖入 `.pdf`，用 go-fitz（MuPDF）按 150 / 300 DPI 逐页导出 PNG，支持页码范围
 - 转换 / 导出全程进度条，显示百分比与当前页
 - 生成完成后弹出成功提示
 
@@ -34,8 +35,8 @@ render.go     文本分行分页、字体栅格化、页面绘制、水印旋转
 pdf.go        纯 Go PDF 写入：逐页渲染为 RGB 图像并嵌入 PDF
 pdfcrypt.go   PDF 标准安全处理器：RC4 128 位加密、/O /U /P 与权限位
 docx.go       纯 Go Word 导出：OOXML 打包、段落与字体设置
-word.go       Word 转图片的 RPC 服务：读取 docx、保存前端回传的 PNG
-frontend/     Vite + TypeScript 前端：docx-preview + pagedjs + html2canvas
+word.go       Word 转 PDF：调用 LibreOffice 排版，纯 Go 渲染每页并叠加水印后写出 PDF
+pdf2img.go    PDF 转图片：go-fitz 打开 PDF，按 DPI 逐页渲染 PNG
 archive.go    压缩包导出：内置 AES-256 ZIP，或调用系统 7-Zip 生成加密 7z
 fonts.go      系统字体探测、字体列表扫描、TTC/TTF/OTF 字体解析缓存
 textfile.go   TXT 编码识别与解码
@@ -72,24 +73,40 @@ resources/    应用图标与界面截图
 - **实时预览**：设置变更后做防抖后台渲染，只生成当前页的缩放预览，避免阻塞 UI；导出时逐页后台生成并更新进度。
 - **编码**：优先 UTF-8；失败时用 `x/text` 的 GB18030 解码，同时处理 UTF-16 BOM。
 
-## Word 转图片
+## Word 转 PDF
 
-顶部切到「Word 转图片」，在左侧拖入 `.docx` 或点「选择 Word 文件」：
+顶部切到「Word 转 PDF」，在左侧拖入 `.docx` / `.doc` 或点「选择 Word 文件」：
 
-1. Go 读取 `.docx`，以 base64 通过事件推给 WebView。
-2. `docx-preview` 把文档渲染到 DOM。
-3. 显式分页转成 `data-break-before="page"`，交给 `pagedjs` 按 A4、20mm 边距分页。
-4. 对每个 `.pagedjs_page` 节点调用 `html2canvas`，`scale=2`、白底 `#ffffff`，不使用可视区域截图。
-5. 每页 PNG 转 base64 回传 Go，保存到 Word 文件旁的 `<文件名>_images` 目录，按页码命名为 `_001.png`。
+1. 选择文件后，先调用本机 LibreOffice 的 `soffice --headless` 把 Word 转成临时 PDF，读出总页数。
+2. 右侧显示页面预览，可逐页翻看；预览也会叠加当前水印设置。
+3. 在「转换范围」里填起始页和结束页（点「全部」恢复整本），再点「开始转换」。
+4. 用纯 Go 的 PDF 渲染器按 150 DPI 渲染选中页，A4 约 1240 × 1754 像素。
+5. 按当前水印设置叠加斜向平铺文字，字号会随页面宽度等比缩放。
+6. 逐页写成图片型 PDF，保存到 Word 文件旁的 `<文件名>.pdf`，同名覆盖。
 
-分页规则：表格行 `break-inside: avoid`，短段落整体不拆，长段落按页高切分。进度条按真实阶段推进：解析、分页页数、截图页数。30 秒无进展才判定超时，总上限 3 分钟。
+选择文件不会自动开始转换；换文件或改水印后需要重新点「开始转换」。保留原文档的字体、表格、分页、页眉页脚和图片；只导出选中的页码。LibreOffice 转换超时 3 分钟，最多 500 页。水印文字留空则不加。
 
-全程只输出 PNG，不生成 PDF，也不调用打印；渲染依赖 WebView 内核，不需要 LibreOffice。大文档的 base64 回传会占用较多内存，超过 500 页会被拒绝。
+部分导出工具（如 WPS）会给每个段落都写一个「随文文本框」标记（`w:framePr`），LibreOffice 会因此把正文拆成一页一段，页面上只剩标题。转换前会自动复制一份并清掉这类标记，原文件不会被改动。
+
+首次使用如果提示未检测到 LibreOffice，在左侧点「安装 LibreOffice」会打开系统浏览器，安装后点「重新检测」即可，不需要重启应用。也可以用环境变量 `SOFFICE_PATH` 指定 `soffice` 的路径。
+
+## PDF 转图片
+
+顶部切到「PDF 转图片」，在左侧拖入 `.pdf` 或点「选择 PDF 文件」：
+
+1. 选择文件后立即用 go-fitz（MuPDF）打开，读出总页数。
+2. 右侧显示页面预览，可逐页翻看。
+3. 在「转换范围」里填起始页和结束页（点「全部」恢复整本）。
+4. 在「输出」里选分辨率：150 DPI 适合屏幕阅读，300 DPI 适合打印。
+5. 点「开始转换」，逐页渲染并保存到 PDF 同目录的 `<文件名>_images` 文件夹。
+
+文件名按真实页码补零，如只转第 3–5 页会得到 `_003.png` 到 `_005.png`。已有同名文件会被覆盖；单次最多 500 页。加密 PDF 暂不支持。
 
 ## 环境要求
 
 - Go **1.27.3+**
-- Word 转图片需要 Node.js 与 npm，并在 `frontend/` 下执行 `npm install`
+- Word 转 PDF 需要本机安装 LibreOffice（`soffice`），否则左侧会显示安装入口
+- PDF 转图片使用 go-fitz，打包或开发时都要打开 CGO（见上方构建命令）
 - 导出 7z 压缩包时需要系统已安装 7-Zip 命令行（如 `brew install sevenzip`）；ZIP 无需额外依赖
 - asdf 用户可使用项目内的 `.tool-versions`：
 
@@ -105,19 +122,20 @@ go version
 
 ```bash
 go mod tidy
-(cd frontend && npm install)
-go tool mygo dev
+go run .
 ```
 
-`mygo dev` 会启动 Vite 并加载前端，Word 转图片依赖它。只使用 PNG / PDF / Word 导出时，也可以直接 `go run .`；打包用 `go tool mygo build`，它会先构建前端再嵌入。
+开发时也可以直接用 `CGO_ENABLED=1 go tool mygo dev`；打包用 `CGO_ENABLED=1 go tool mygo build`。应用是原生 UI，不再需要 Node.js 或前端构建。
+
+`mygo` 默认关闭 CGO，而 go-fitz 依赖 MuPDF 静态库，所以涉及 MyGo 的命令要显式打开 `CGO_ENABLED=1`，否则 PDF 转图片会在运行时找不到 `libmupdf.dylib`。
 
 ## 构建桌面应用
 
 ```bash
-go tool mygo build
+CGO_ENABLED=1 go tool mygo build
 ```
 
-产物位于 `build/`。也可以直接用 `go build` 编译当前平台的命令行可执行文件。
+产物位于 `build/`。也可以直接用 `go build` 编译当前平台的命令行可执行文件（默认已启用 CGO）。
 
 ## 开源协议
 

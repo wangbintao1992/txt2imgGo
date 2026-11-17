@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"image/png"
 	"log"
@@ -74,12 +73,35 @@ type app struct {
 	mode    int
 	sideTab int
 
-	wordView       *mygo.WebView
-	wordViewErr    string
-	convertingWord bool
-	wordSource     string
-	wordOutputDir  string
-	wordSeq        atomic.Uint64
+	convertingWord  bool
+	wordPreparing   bool
+	wordSource      string
+	wordOutputPath  string
+	wordSeq         atomic.Uint64
+	wordDoc         *wordDocument
+	wordPages       int
+	wordStartPage   float64
+	wordEndPage     float64
+	wordPreview     *ui.Bitmap
+	wordPreviewAt   int
+	wordPreviewBusy bool
+	wordPreviewSeq  atomic.Uint64
+	sofficePath     string
+
+	pdfConverting  bool
+	pdfPreparing   bool
+	pdfSource      string
+	pdfOutputDir   string
+	pdfSeq         atomic.Uint64
+	pdfDoc         *pdfDocument
+	pdfPages       int
+	pdfStartPage   float64
+	pdfEndPage     float64
+	pdfDPILevel    int
+	pdfPreview     *ui.Bitmap
+	pdfPreviewAt   int
+	pdfPreviewBusy bool
+	pdfPreviewSeq  atomic.Uint64
 
 	page       int
 	pages      int
@@ -116,8 +138,11 @@ func newApp() *app {
 		antiNoiseStrength:  40,
 		archiveFormat:      archiveFormatLabels[0],
 		status:             "拖入或选择 TXT 文件开始",
+		wordStartPage:      1,
+		wordEndPage:        1,
 	}
 	a.sevenZip = find7z()
+	a.sofficePath = findSoffice()
 	a.setFontOptions([]fontOption{{Label: systemFontName, Ref: ref}})
 	return a
 }
@@ -205,14 +230,11 @@ func (a *app) view(c *ui.Context) {
 		ui.Row(c).AlignItems(ui.Center).Gap(16).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
 				ui.Text(c, windowTitle).FontSize(24).Bold()
-				ui.Text(c, "文本与 Word 转图片").FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, "文本转图片、Word 导出 PDF、PDF 转图片").FontSize(12).TextColor(t.TextMuted)
 			})
 			before := a.mode
-			ui.Tabs(c, &a.mode, "文本转图片", "Word 转图片").Width(280)
+			ui.Tabs(c, &a.mode, "文本转图片", "Word 转 PDF", "PDF 转图片").Width(420)
 			if before != a.mode {
-				if a.mode == 1 {
-					a.initWordView()
-				}
 				a.statusErr = false
 			}
 			ui.Box(c).Grow(1)
@@ -221,9 +243,12 @@ func (a *app) view(c *ui.Context) {
 
 		ui.Row(c).Fill().MinHeight(0).Gap(18).Children(func() {
 			a.sidebar(c)
-			if a.mode == 1 {
-				a.wordViewPanel(c)
-			} else {
+			switch a.mode {
+			case 1:
+				a.wordPreviewPanel(c)
+			case 2:
+				a.pdfPreviewPanel(c)
+			default:
 				a.previewPanel(c)
 			}
 		})
@@ -232,10 +257,24 @@ func (a *app) view(c *ui.Context) {
 
 func (a *app) sidebar(c *ui.Context) {
 	ui.Column(c).Width(leftPaneWidth).FillHeight().MinHeight(0).Gap(10).Children(func() {
+		if a.mode == 2 {
+			ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
+				ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
+					a.pdfPickPanel(c)
+					a.pdfRangePanel(c)
+					a.pdfOutputPanel(c)
+					a.pdfTipsPanel(c)
+				})
+			})
+			return
+		}
 		if a.mode == 1 {
 			ui.Scroll(c).Grow(1).MinHeight(0).Children(func() {
 				ui.Column(c).Width(leftContentWidth).Gap(12).Children(func() {
 					a.wordPickPanel(c)
+					a.wordRangePanel(c)
+					a.wordEnginePanel(c)
+					a.wordWatermarkPanel(c)
 					a.wordResultPanel(c)
 					a.wordTipsPanel(c)
 				})
@@ -593,7 +632,7 @@ func (a *app) wordPickPanel(c *ui.Context) {
 	t := c.Theme()
 	zone := ui.Column(c).Width(leftContentWidth).Height(176).Padding(14).Gap(8).
 		Radius(12).Background(t.Surface).Border(1, t.Border).
-		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.generating)
+		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.wordBusy())
 
 	if files := zone.DroppedFiles(); files != nil {
 		a.handleWordDrop(files)
@@ -604,7 +643,7 @@ func (a *app) wordPickPanel(c *ui.Context) {
 
 	zone.Children(func() {
 		ui.Text(c, "拖入 Word 文件").FontSize(18).Bold()
-		ui.Text(c, ".docx · 自动按 A4 分页，一页一张 PNG").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, ".docx / .doc · LibreOffice 排版，导出带水印 PDF").FontSize(11).TextColor(t.TextMuted)
 		if ui.Button(c, "选择 Word 文件").Width(180).Height(34).Clicked() {
 			a.chooseWordFile()
 		}
@@ -614,16 +653,144 @@ func (a *app) wordPickPanel(c *ui.Context) {
 	})
 }
 
+// wordBusy 表示 Word 模式正在读取、预览或转换，暂不接受新任务。
+func (a *app) wordBusy() bool {
+	return a.generating || a.convertingWord || a.wordPreparing || a.wordPreviewBusy
+}
+
+func (a *app) wordPageCount() int {
+	if a.wordDoc == nil {
+		return 0
+	}
+	return a.wordDoc.PageCount
+}
+
+func (a *app) wordRangePanel(c *ui.Context) {
+	t := c.Theme()
+	total := a.wordPageCount()
+	busy := a.wordBusy()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "转换范围").FontSize(14).Bold()
+			ui.Box(c).Grow(1)
+			if total > 0 {
+				ui.Textf(c, "共 %d 页", total).FontSize(11).TextColor(t.TextMuted)
+			}
+		})
+
+		if total == 0 {
+			ui.Text(c, "选择 Word 文件后自动读取总页数。").FontSize(11).TextColor(t.TextMuted)
+		}
+
+		limit := float64(max(total, 1))
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "从").FontSize(12)
+			ui.NumberInput(c, &a.wordStartPage, 1, limit, 1).Width(76).Disabled(total == 0 || busy)
+			ui.Text(c, "到").FontSize(12)
+			ui.NumberInput(c, &a.wordEndPage, 1, limit, 1).Width(76).Disabled(total == 0 || busy)
+			if ui.Button(c, "全部").Width(56).Disabled(total == 0 || busy).Clicked() {
+				a.wordStartPage = 1
+				a.wordEndPage = float64(total)
+			}
+		})
+
+		label := "开始转换"
+		if a.convertingWord {
+			label = "正在转换…"
+		} else if a.wordPreparing {
+			label = "正在读取页数…"
+		}
+		if ui.PrimaryButton(c, label).Width(leftContentWidth - 32).Height(38).
+			Disabled(total == 0 || busy).Clicked() {
+			a.startWordConversion()
+		}
+	})
+}
+
+func (a *app) wordEnginePanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(8).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "转换引擎").FontSize(14).Bold()
+			ui.Box(c).Grow(1)
+			if a.sofficePath != "" {
+				ui.Text(c, "已就绪").FontSize(11).TextColor(t.Accent)
+			} else {
+				ui.Text(c, "未安装").FontSize(11).TextColor(t.Danger)
+			}
+		})
+		if a.sofficePath != "" {
+			ui.Text(c, a.sofficePath).FontSize(11).TextColor(t.TextMuted).MaxLines(2)
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c, "重新检测").Width(96).Clicked() {
+					a.refreshSoffice()
+					a.setStatus("LibreOffice 已就绪", false)
+				}
+				if ui.Button(c, "安装 LibreOffice").Grow(1).Clicked() {
+					c.OpenURL(libreOfficeDownloadURL)
+				}
+			})
+			return
+		}
+		ui.Text(c, "Word 转 PDF 需要 LibreOffice。安装后回到这里点「重新检测」，不用重启应用。").FontSize(11).TextColor(t.TextMuted)
+		ui.Row(c).Gap(8).Children(func() {
+			if ui.PrimaryButton(c, "安装 LibreOffice").Grow(1).Clicked() {
+				c.OpenURL(libreOfficeDownloadURL)
+			}
+			if ui.Button(c, "重新检测").Width(96).Clicked() {
+				a.refreshSoffice()
+				if a.sofficePath != "" {
+					a.setStatus("LibreOffice 已就绪", false)
+				} else {
+					a.setStatus("仍未检测到 LibreOffice", true)
+				}
+			}
+		})
+	})
+}
+
+func (a *app) wordWatermarkPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(8).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "水印").FontSize(14).Bold()
+			ui.Box(c).Grow(1)
+			ui.Text(c, "斜向平铺").FontSize(11).TextColor(t.TextMuted)
+		})
+		a.settingRow(c, "水印文字", func() {
+			ui.TextInput(c, &a.watermark).Placeholder("留空则不加").Grow(1)
+		})
+		a.settingRow(c, "字号", func() {
+			ui.NumberInput(c, &a.watermarkSize, 12, 160, 1).Width(92)
+			ui.Text(c, "px").FontSize(11).TextColor(t.TextMuted)
+			ui.Box(c).Grow(1)
+		})
+		a.settingRow(c, "透明度", func() {
+			ui.Slider(c, &a.watermarkOpacity, 5, 100).Step(1).Grow(1)
+			ui.Textf(c, "%.0f%%", a.watermarkOpacity).Width(42).FontSize(11).
+				TextColor(t.TextMuted).TextAlign(ui.End)
+		})
+		a.settingRow(c, "倾斜角度", func() {
+			ui.Slider(c, &a.watermarkAngle, -75, 75).Step(1).Grow(1)
+			ui.Textf(c, "%.0f°", a.watermarkAngle).Width(42).FontSize(11).
+				TextColor(t.TextMuted).TextAlign(ui.End)
+		})
+	})
+}
+
 func (a *app) wordResultPanel(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(8).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Children(func() {
 		ui.Text(c, "输出").FontSize(14).Bold()
-		if a.wordOutputDir != "" {
-			ui.Text(c, a.wordOutputDir).FontSize(12).TextColor(t.TextMuted).MaxLines(3)
-			ui.Textf(c, "已保存 %d 张 PNG", a.pages).FontSize(11).TextColor(t.TextMuted)
+		if a.wordOutputPath != "" {
+			ui.Text(c, a.wordOutputPath).FontSize(12).TextColor(t.TextMuted).MaxLines(3)
+			ui.Textf(c, "已保存 %d 页 PDF", a.wordPages).FontSize(11).TextColor(t.TextMuted)
 		} else {
-			ui.Text(c, "保存到 Word 文件同目录的 <文件名>_images 文件夹").FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "保存到 Word 文件同目录的 <文件名>.pdf，同名覆盖").FontSize(12).TextColor(t.TextMuted)
 		}
 	})
 }
@@ -633,75 +800,168 @@ func (a *app) wordTipsPanel(c *ui.Context) {
 	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(6).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Children(func() {
 		ui.Text(c, "说明").FontSize(14).Bold()
-		ui.Text(c, "· A4 页面，20mm 页边距，2x 分辨率").FontSize(11).TextColor(t.TextMuted)
-		ui.Text(c, "· 表格行不拆，短段不拆，长段控制孤行寡行").FontSize(11).TextColor(t.TextMuted)
-		ui.Text(c, "· 整体超时 30 秒，只输出 PNG，不生成 PDF").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· LibreOffice 转 PDF，再逐页渲染叠加水印").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 先读取总页数，再选页码范围点「开始转换」").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 保留原文档字体、表格、分页与页眉页脚").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 页面按 150 DPI 渲染，A4 输出约 1240 × 1754").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 水印叠加在页面上，原 Word 文件不改动").FontSize(11).TextColor(t.TextMuted)
 	})
 }
 
-func (a *app) initWordView() {
-	if a.wordView != nil || a.win == nil {
-		return
-	}
-	v, err := a.win.NewWebView(mygo.WebViewOptions{
-		URL:             "/word",
-		BackgroundColor: "#ffffff",
-	})
-	if err != nil {
-		a.wordViewErr = "打开 Word 转换页失败: " + err.Error()
-		a.setStatus(a.wordViewErr, true)
-		return
-	}
-	v.Page().OnDidFailLoad(func(e *mygo.LoadError) {
-		a.wordViewErr = "加载 Word 转换页失败: " + e.Description
-		a.setStatus(a.wordViewErr, true)
-	})
-	v.Page().OnDidFinishLoad(func() {
-		a.wordViewErr = ""
-	})
-	a.wordView = v
-}
-
-func (a *app) wordViewPanel(c *ui.Context) {
+func (a *app) wordPreviewPanel(c *ui.Context) {
 	t := c.Theme()
+	total := a.wordPageCount()
+	busy := a.wordBusy()
 	ui.Column(c).Grow(1).FillHeight().Padding(12).Gap(10).Radius(12).
 		Background(t.Surface).Border(1, t.Border).Children(func() {
 		ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
-			ui.Text(c, "转换进度").FontSize(14).Bold()
-			ui.Text(c, "A4 · 20mm · 2x").FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, "页面预览").FontSize(14).Bold()
+			if total > 0 {
+				ui.Textf(c, "共 %d 页", total).FontSize(11).TextColor(t.TextMuted)
+			}
 			ui.Box(c).Grow(1)
+			if ui.Button(c, "上一页").Width(68).Disabled(busy || a.wordPreviewAt <= 1).Clicked() {
+				a.scheduleWordPreview(a.wordPreviewAt - 1)
+			}
+			if ui.Button(c, "下一页").Width(68).Disabled(busy || total == 0 || a.wordPreviewAt >= total).Clicked() {
+				a.scheduleWordPreview(a.wordPreviewAt + 1)
+			}
 		})
-		if a.wordViewErr != "" {
-			ui.Text(c, a.wordViewErr).FontSize(12).TextColor(t.Danger).MaxWidth(520)
-			ui.Text(c, "开发时使用 go tool mygo dev，打包后使用 go tool mygo build。").FontSize(11).TextColor(t.TextMuted)
-		} else if a.wordView != nil {
-			ui.WebView(c, a.wordView).Grow(1).Radius(8)
-		}
+
+		ui.Box(c).Grow(1).MinHeight(0).Padding(10).Radius(8).Border(1, t.Border).
+			Background(t.Background).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+			switch {
+			case a.wordPreparing:
+				ui.Column(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c)
+					ui.Text(c, a.status).FontSize(12).TextColor(t.TextMuted).MaxWidth(420)
+					ui.Progress(c, a.progress).Width(280)
+				})
+			case a.convertingWord:
+				ui.Column(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c)
+					ui.Text(c, a.status).FontSize(12).TextColor(t.TextMuted).MaxWidth(420)
+					ui.Progress(c, a.progress).Width(280)
+				})
+			case a.wordPreviewBusy:
+				ui.Column(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c)
+					ui.Text(c, "正在渲染预览…").FontSize(12).TextColor(t.TextMuted)
+				})
+			case a.wordPreview != nil:
+				ui.Image(c, a.wordPreview).Fill().Fit(ui.Contain)
+			case a.wordSource != "":
+				ui.Text(c, "读取失败，请重新选择 Word 文件").TextColor(t.TextMuted).FontSize(13)
+			default:
+				ui.Text(c, "选择 Word 文件后，这里显示页面预览").TextColor(t.TextMuted).FontSize(13)
+			}
+		})
+
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			if total > 0 {
+				page := a.wordPreviewAt
+				if page < 1 {
+					page = 1
+				}
+				ui.Textf(c, "第 %d / %d 页", page, total).FontSize(12).TextColor(t.TextMuted)
+			} else {
+				ui.Text(c, "LibreOffice 转换").FontSize(12).TextColor(t.TextMuted)
+			}
+			ui.Box(c).Grow(1)
+			ui.Text(c, "预览为 PDF 页面缩小显示").FontSize(11).TextColor(t.TextMuted)
+		})
 	})
 }
 
+func (a *app) refreshSoffice() {
+	a.sofficePath = findSoffice()
+}
+
+func (a *app) wordOptions() wordConvertOptions {
+	ref, _ := a.currentFont()
+	return wordConvertOptions{
+		Watermark:        a.watermark,
+		WatermarkSize:    a.watermarkSize,
+		WatermarkOpacity: a.watermarkOpacity / 100,
+		WatermarkAngle:   a.watermarkAngle,
+		Font:             ref,
+	}
+}
+
+// scheduleWordPreview 从已准备好的 PDF 渲染一页作为预览。
+func (a *app) scheduleWordPreview(page int) {
+	doc := a.wordDoc
+	if a.win == nil || doc == nil {
+		return
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > doc.PageCount {
+		page = doc.PageCount
+	}
+	seq := a.wordPreviewSeq.Add(1)
+	opt := a.wordOptions()
+	a.wordPreviewBusy = true
+	go func() {
+		img, err := doc.RenderPage(page, opt)
+		if a.win == nil {
+			return
+		}
+		if err != nil {
+			log.Printf("[word] 预览第 %d 页失败: %v", page, err)
+			a.win.Update(func() {
+				if a.wordPreviewSeq.Load() != seq {
+					return
+				}
+				a.wordPreviewBusy = false
+				a.setStatus("预览失败: "+err.Error(), true)
+			})
+			return
+		}
+		small := scalePreview(img, previewMaxW, previewMaxH)
+		bitmap := ui.NewBitmap(small)
+		a.win.Update(func() {
+			if a.wordPreviewSeq.Load() != seq {
+				return
+			}
+			a.wordPreview = bitmap
+			a.wordPreviewAt = page
+			a.wordPreviewBusy = false
+		})
+	}()
+}
+
+func (a *app) releaseWordDocument() {
+	if a.wordDoc != nil {
+		a.wordDoc.Close()
+		a.wordDoc = nil
+	}
+}
+
 func (a *app) handleWordDrop(files []string) {
-	if a.generating {
+	if a.wordBusy() {
 		return
 	}
 	for _, file := range files {
-		if strings.EqualFold(filepath.Ext(file), ".docx") {
-			a.startWordConversion(file)
+		ext := strings.ToLower(filepath.Ext(file))
+		if ext == ".docx" || ext == ".doc" {
+			a.selectWordFile(file)
 			return
 		}
 	}
-	a.setStatus("请拖入 .docx 文件", true)
+	a.setStatus("请拖入 .docx 或 .doc 文件", true)
 }
 
 func (a *app) chooseWordFile() {
-	if a.generating {
+	if a.wordBusy() {
 		return
 	}
 	go func() {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent:  a.win,
 			Title:   "选择 Word 文档",
-			Filters: []mygo.FileFilter{{Name: "Word 文档", Extensions: []string{"docx"}}},
+			Filters: []mygo.FileFilter{{Name: "Word 文档", Extensions: []string{"docx", "doc"}}},
 		})
 		if err != nil {
 			a.win.Update(func() { a.setStatus("选择 Word 失败: "+err.Error(), true) })
@@ -710,107 +970,167 @@ func (a *app) chooseWordFile() {
 		if len(paths) == 0 {
 			return
 		}
-		a.win.Update(func() { a.startWordConversion(paths[0]) })
+		a.win.Update(func() { a.selectWordFile(paths[0]) })
 	}()
 }
 
-func (a *app) startWordConversion(path string) {
-	if a.generating {
+// selectWordFile 只登记文件并读取页数，真正转换要等用户点「开始转换」。
+func (a *app) selectWordFile(path string) {
+	if a.wordBusy() {
 		return
 	}
-	a.initWordView()
-	if a.wordView == nil {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".docx" && ext != ".doc" {
+		a.setStatus("只支持 .docx / .doc 文件", true)
 		return
 	}
-	if a.wordViewErr != "" {
-		a.setStatus(a.wordViewErr, true)
-		return
-	}
-	seq := a.wordSeq.Add(1)
 	a.mode = 1
-	a.generating = true
-	a.convertingWord = true
-	a.progress = 0.03
-	a.statusErr = false
-	a.wordSource = path
-	a.wordOutputDir = ""
-	log.Printf("[word] 选择文件 %s", path)
-	a.setStatus("正在读取 Word…", false)
-	if wordService != nil {
-		wordService.setSource(path)
+	if a.sofficePath == "" {
+		a.refreshSoffice()
+	}
+	if a.sofficePath == "" {
+		a.releaseWordDocument()
+		a.wordPreviewSeq.Add(1)
+		a.wordPreview = nil
+		a.wordPreviewAt = 0
+		a.wordPreviewBusy = false
+		a.wordSource = path
+		a.setStatus("未检测到 LibreOffice，请先安装", true)
+		return
 	}
 
+	a.releaseWordDocument()
+	a.wordSeq.Add(1)
+	a.wordPreviewSeq.Add(1)
+	seq := a.wordSeq.Load()
+
+	a.wordSource = path
+	a.wordOutputPath = ""
+	a.wordPages = 0
+	a.wordStartPage = 1
+	a.wordEndPage = 1
+	a.wordPreview = nil
+	a.wordPreviewAt = 0
+	a.wordPreviewBusy = false
+	a.wordPreparing = true
+	a.generating = true
+	a.progress = 0.05
+	a.statusErr = false
+	log.Printf("[word] 选择文件 %s", path)
+	a.setStatus("正在读取 "+filepath.Base(path)+"…", false)
+
+	soffice := a.sofficePath
 	go func() {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			a.finishWordError("读取 Word 失败: " + err.Error())
+		doc, err := prepareWordDocument(soffice, path, func(status string, fraction float64) {
+			if a.win == nil {
+				return
+			}
+			a.win.Update(func() {
+				if a.wordSeq.Load() != seq || !a.wordPreparing {
+					return
+				}
+				a.statusErr = false
+				a.progress = fraction
+				a.status = status
+			})
+		})
+		if a.win == nil {
+			if doc != nil {
+				doc.Close()
+			}
 			return
 		}
-		encoded := base64.StdEncoding.EncodeToString(data)
+		a.win.Update(func() {
+			if a.wordSeq.Load() != seq {
+				if doc != nil {
+					doc.Close()
+				}
+				return
+			}
+			a.wordPreparing = false
+			a.generating = false
+			if err != nil {
+				a.progress = 0
+				log.Printf("[word] 读取失败：%s", err.Error())
+				a.setStatus(err.Error(), true)
+				return
+			}
+			a.wordDoc = doc
+			a.wordStartPage = 1
+			a.wordEndPage = float64(doc.PageCount)
+			a.progress = 1
+			a.setStatus(fmt.Sprintf("已读取 %d 页 · 选好范围后点「开始转换」", doc.PageCount), false)
+			a.scheduleWordPreview(1)
+		})
+	}()
+}
+
+// startWordConversion 用准备好的 PDF 渲染用户选中的页码。
+func (a *app) startWordConversion() {
+	if a.wordBusy() {
+		return
+	}
+	doc := a.wordDoc
+	if doc == nil {
+		a.setStatus("请先选择 Word 文件", true)
+		return
+	}
+	if a.sofficePath == "" {
+		a.refreshSoffice()
+		if a.sofficePath == "" {
+			a.setStatus("未检测到 LibreOffice，请先安装", true)
+			return
+		}
+	}
+	ref, ok := a.currentFont()
+	if strings.TrimSpace(a.watermark) != "" && !ok {
+		a.setStatus("未找到可用字体，无法生成水印", true)
+		return
+	}
+
+	start, end := pageRange(int(a.wordStartPage+0.5), int(a.wordEndPage+0.5), doc.PageCount)
+	a.wordStartPage = float64(start)
+	a.wordEndPage = float64(end)
+
+	seq := a.wordSeq.Add(1)
+	a.generating = true
+	a.convertingWord = true
+	a.progress = 0.02
+	a.statusErr = false
+	a.wordOutputPath = ""
+	a.setStatus(fmt.Sprintf("正在转换第 %d–%d 页…", start, end), false)
+
+	options := a.wordOptions()
+	options.Font = ref
+	options.StartPage = start
+	options.EndPage = end
+	options.Progress = func(status string, fraction float64) {
+		if a.win == nil {
+			return
+		}
 		a.win.Update(func() {
 			if a.wordSeq.Load() != seq || !a.convertingWord {
 				return
 			}
-			a.progress = 0.06
-			a.setStatus("正在解析 Word…", false)
-			log.Printf("[word] 发送到渲染页 %s（%d 字节 base64）", filepath.Base(path), len(encoded))
-			if err := WordDocx.Emit(a.win, WordDocxPayload{
-				Name: filepath.Base(path),
-				Data: encoded,
-			}); err != nil {
-				a.finishWordError("发送到渲染页失败: " + err.Error())
-			}
+			a.statusErr = false
+			a.progress = fraction
+			a.status = status
 		})
-	}()
+	}
 
-	time.AfterFunc(3*time.Minute, func() {
+	go func() {
+		path, pages, err := doc.ExportPDF(options)
+		if err != nil {
+			if a.wordSeq.Load() == seq {
+				a.finishWordError(err.Error())
+			}
+			return
+		}
 		if a.wordSeq.Load() != seq {
 			return
 		}
-		a.win.Update(func() {
-			if a.convertingWord {
-				log.Printf("[word] 超时未收到渲染结果")
-				a.finishWordError("Word 转换超时")
-			}
-		})
-	})
-}
-
-func (a *app) reportWord(stage string, done, total int) {
-	if a.win == nil {
-		return
-	}
-	a.win.Update(func() {
-		if !a.convertingWord {
-			return
-		}
-		a.statusErr = false
-		switch stage {
-		case "parse":
-			a.progress = 0.08
-			a.status = "正在解析 Word…"
-		case "paginate":
-			if total > 0 {
-				ratio := float64(done) / float64(total)
-				if ratio > 1 {
-					ratio = 1
-				}
-				a.progress = 0.10 + 0.30*ratio
-				a.status = fmt.Sprintf("正在分页 %d / %d 页", done, total)
-			} else {
-				a.progress = 0.10
-				a.status = "正在按 A4 分页…"
-			}
-		case "capture":
-			if total > 0 {
-				a.progress = 0.40 + 0.58*float64(done)/float64(total)
-				a.status = fmt.Sprintf("正在截图 %d / %d", done, total)
-			}
-		case "save":
-			a.progress = 0.94
-			a.status = "正在保存图片…"
-		}
-	})
+		a.finishWordSuccess(path, pages)
+	}()
 }
 
 func (a *app) finishWordError(message string) {
@@ -828,7 +1148,7 @@ func (a *app) finishWordError(message string) {
 	})
 }
 
-func (a *app) finishWordSuccess(dir string, count int) {
+func (a *app) finishWordSuccess(path string, pages int) {
 	if a.win == nil {
 		a.generating = false
 		a.convertingWord = false
@@ -838,10 +1158,424 @@ func (a *app) finishWordSuccess(dir string, count int) {
 		a.generating = false
 		a.convertingWord = false
 		a.progress = 1
-		a.wordOutputDir = dir
-		a.pages = count
-		log.Printf("[word] 完成：%d 张，%s", count, dir)
-		a.setStatus(fmt.Sprintf("已保存 %d 张 PNG · %s", count, dir), false)
+		a.wordOutputPath = path
+		a.wordPages = pages
+		log.Printf("[word] 完成：%d 页，%s", pages, path)
+		a.setStatus(fmt.Sprintf("已保存 %d 页 PDF · %s", pages, path), false)
+	})
+}
+
+// ---- PDF 转图片 ----
+
+func (a *app) pdfBusy() bool {
+	return a.generating || a.pdfConverting || a.pdfPreparing || a.pdfPreviewBusy
+}
+
+func (a *app) pdfPageCount() int {
+	if a.pdfDoc == nil {
+		return 0
+	}
+	return a.pdfDoc.PageCount
+}
+
+// pdfDPI 把「150 DPI / 300 DPI」两个档位映射成数值。
+func (a *app) pdfDPI() float64 {
+	if a.pdfDPILevel == 1 {
+		return 300
+	}
+	return 150
+}
+
+func (a *app) pdfPickPanel(c *ui.Context) {
+	t := c.Theme()
+	zone := ui.Column(c).Width(leftContentWidth).Height(150).Padding(14).Gap(8).
+		Radius(12).Background(t.Surface).Border(1, t.Border).
+		AlignItems(ui.Center).Justify(ui.Center).Disabled(a.pdfBusy())
+
+	if files := zone.DroppedFiles(); files != nil {
+		a.handlePDFDrop(files)
+	}
+	if zone.FileDragOver() {
+		zone.Border(2, t.Accent)
+	}
+
+	zone.Children(func() {
+		ui.Text(c, "拖入 PDF 文件").FontSize(18).Bold()
+		ui.Text(c, ".pdf · go-fitz 逐页渲染，一页一张 PNG").FontSize(11).TextColor(t.TextMuted)
+		if ui.Button(c, "选择 PDF 文件").Width(180).Height(34).Clicked() {
+			a.choosePDFFile()
+		}
+		if a.pdfSource != "" {
+			ui.Text(c, filepath.Base(a.pdfSource)).FontSize(12).MaxLines(1)
+		}
+	})
+}
+
+func (a *app) pdfRangePanel(c *ui.Context) {
+	t := c.Theme()
+	total := a.pdfPageCount()
+	busy := a.pdfBusy()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "转换范围").FontSize(14).Bold()
+			ui.Box(c).Grow(1)
+			if total > 0 {
+				ui.Textf(c, "共 %d 页", total).FontSize(11).TextColor(t.TextMuted)
+			}
+		})
+
+		if total == 0 {
+			ui.Text(c, "选择 PDF 文件后自动读取总页数。").FontSize(11).TextColor(t.TextMuted)
+		}
+		limit := float64(max(total, 1))
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "从").FontSize(12)
+			ui.NumberInput(c, &a.pdfStartPage, 1, limit, 1).Width(76).Disabled(total == 0 || busy)
+			ui.Text(c, "到").FontSize(12)
+			ui.NumberInput(c, &a.pdfEndPage, 1, limit, 1).Width(76).Disabled(total == 0 || busy)
+			if ui.Button(c, "全部").Width(56).Disabled(total == 0 || busy).Clicked() {
+				a.pdfStartPage = 1
+				a.pdfEndPage = float64(total)
+			}
+		})
+
+		label := "开始转换"
+		if a.pdfConverting {
+			label = "正在转换…"
+		} else if a.pdfPreparing {
+			label = "正在读取页数…"
+		}
+		if ui.PrimaryButton(c, label).Width(leftContentWidth - 32).Height(38).
+			Disabled(total == 0 || busy).Clicked() {
+			a.startPDFConversion()
+		}
+	})
+}
+
+func (a *app) pdfOutputPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(8).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Text(c, "输出").FontSize(14).Bold()
+		a.settingRow(c, "分辨率", func() {
+			ui.Tabs(c, &a.pdfDPILevel, "150 DPI", "300 DPI").Width(200).Disabled(a.pdfBusy())
+		})
+		if a.pdfOutputDir != "" {
+			ui.Text(c, a.pdfOutputDir).FontSize(12).TextColor(t.TextMuted).MaxLines(3)
+			ui.Textf(c, "已保存 %d 张 PNG", a.pdfPages).FontSize(11).TextColor(t.TextMuted)
+		} else {
+			ui.Text(c, "保存到 PDF 同目录的 <文件名>_images 文件夹，同名覆盖").FontSize(12).TextColor(t.TextMuted)
+		}
+	})
+}
+
+func (a *app) pdfTipsPanel(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(leftContentWidth).Padding(16).Gap(6).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Text(c, "说明").FontSize(14).Bold()
+		ui.Text(c, "· go-fitz（MuPDF）渲染，不用装外部程序").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 先读取总页数，再选页码范围点「开始转换」").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 150 DPI：A4 约 1240 × 1754 像素").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 300 DPI：A4 约 2480 × 3508 像素").FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "· 文件按真实页码命名，如只转第 3–5 页得到 _003 到 _005").FontSize(11).TextColor(t.TextMuted)
+	})
+}
+
+func (a *app) pdfPreviewPanel(c *ui.Context) {
+	t := c.Theme()
+	total := a.pdfPageCount()
+	busy := a.pdfBusy()
+	ui.Column(c).Grow(1).FillHeight().Padding(12).Gap(10).Radius(12).
+		Background(t.Surface).Border(1, t.Border).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+			ui.Text(c, "页面预览").FontSize(14).Bold()
+			if total > 0 {
+				ui.Textf(c, "共 %d 页", total).FontSize(11).TextColor(t.TextMuted)
+			}
+			ui.Box(c).Grow(1)
+			if ui.Button(c, "上一页").Width(68).Disabled(busy || a.pdfPreviewAt <= 1).Clicked() {
+				a.schedulePDFPreview(a.pdfPreviewAt - 1)
+			}
+			if ui.Button(c, "下一页").Width(68).Disabled(busy || total == 0 || a.pdfPreviewAt >= total).Clicked() {
+				a.schedulePDFPreview(a.pdfPreviewAt + 1)
+			}
+		})
+
+		ui.Box(c).Grow(1).MinHeight(0).Padding(10).Radius(8).Border(1, t.Border).
+			Background(t.Background).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+			switch {
+			case a.pdfPreparing || a.pdfConverting:
+				ui.Column(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c)
+					ui.Text(c, a.status).FontSize(12).TextColor(t.TextMuted).MaxWidth(420)
+					ui.Progress(c, a.progress).Width(280)
+				})
+			case a.pdfPreviewBusy:
+				ui.Column(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c)
+					ui.Text(c, "正在渲染预览…").FontSize(12).TextColor(t.TextMuted)
+				})
+			case a.pdfPreview != nil:
+				ui.Image(c, a.pdfPreview).Fill().Fit(ui.Contain)
+			case a.pdfSource != "":
+				ui.Text(c, "读取失败，请重新选择 PDF 文件").TextColor(t.TextMuted).FontSize(13)
+			default:
+				ui.Text(c, "选择 PDF 文件后，这里显示页面预览").TextColor(t.TextMuted).FontSize(13)
+			}
+		})
+
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			if total > 0 {
+				page := a.pdfPreviewAt
+				if page < 1 {
+					page = 1
+				}
+				ui.Textf(c, "第 %d / %d 页", page, total).FontSize(12).TextColor(t.TextMuted)
+			} else {
+				ui.Text(c, "go-fitz 渲染").FontSize(12).TextColor(t.TextMuted)
+			}
+			ui.Box(c).Grow(1)
+			ui.Text(c, "预览为页面缩小显示").FontSize(11).TextColor(t.TextMuted)
+		})
+	})
+}
+
+func (a *app) handlePDFDrop(files []string) {
+	if a.pdfBusy() {
+		return
+	}
+	for _, file := range files {
+		if strings.EqualFold(filepath.Ext(file), ".pdf") {
+			a.selectPDFFile(file)
+			return
+		}
+	}
+	a.setStatus("请拖入 .pdf 文件", true)
+}
+
+func (a *app) choosePDFFile() {
+	if a.pdfBusy() {
+		return
+	}
+	go func() {
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+			Parent:  a.win,
+			Title:   "选择 PDF 文件",
+			Filters: []mygo.FileFilter{{Name: "PDF 文件", Extensions: []string{"pdf"}}},
+		})
+		if err != nil {
+			a.win.Update(func() { a.setStatus("选择 PDF 失败: "+err.Error(), true) })
+			return
+		}
+		if len(paths) == 0 {
+			return
+		}
+		a.win.Update(func() { a.selectPDFFile(paths[0]) })
+	}()
+}
+
+func (a *app) releasePDFDocument() {
+	if a.pdfDoc != nil {
+		a.pdfDoc.Close()
+		a.pdfDoc = nil
+	}
+}
+
+// selectPDFFile 只登记文件并读取页数，真正转换要等用户点「开始转换」。
+func (a *app) selectPDFFile(path string) {
+	if a.pdfBusy() {
+		return
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".pdf") {
+		a.setStatus("只支持 .pdf 文件", true)
+		return
+	}
+	a.mode = 2
+
+	a.releasePDFDocument()
+	a.pdfSeq.Add(1)
+	a.pdfPreviewSeq.Add(1)
+	seq := a.pdfSeq.Load()
+
+	a.pdfSource = path
+	a.pdfOutputDir = ""
+	a.pdfPages = 0
+	a.pdfStartPage = 1
+	a.pdfEndPage = 1
+	a.pdfPreview = nil
+	a.pdfPreviewAt = 0
+	a.pdfPreviewBusy = false
+	a.pdfPreparing = true
+	a.generating = true
+	a.progress = 0.1
+	a.statusErr = false
+	log.Printf("[pdf] 选择文件 %s", path)
+	a.setStatus("正在读取 "+filepath.Base(path)+"…", false)
+
+	go func() {
+		doc, err := preparePDFDocument(path)
+		if a.win == nil {
+			if doc != nil {
+				doc.Close()
+			}
+			return
+		}
+		a.win.Update(func() {
+			if a.pdfSeq.Load() != seq {
+				if doc != nil {
+					doc.Close()
+				}
+				return
+			}
+			a.pdfPreparing = false
+			a.generating = false
+			if err != nil {
+				a.progress = 0
+				log.Printf("[pdf] 读取失败：%s", err.Error())
+				a.setStatus(err.Error(), true)
+				return
+			}
+			a.pdfDoc = doc
+			a.pdfStartPage = 1
+			a.pdfEndPage = float64(doc.PageCount)
+			a.progress = 1
+			a.setStatus(fmt.Sprintf("已读取 %d 页 · 选好范围后点「开始转换」", doc.PageCount), false)
+			a.schedulePDFPreview(1)
+		})
+	}()
+}
+
+// schedulePDFPreview 从已打开的 PDF 渲染一页作为预览。
+func (a *app) schedulePDFPreview(page int) {
+	doc := a.pdfDoc
+	if a.win == nil || doc == nil {
+		return
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > doc.PageCount {
+		page = doc.PageCount
+	}
+	seq := a.pdfPreviewSeq.Add(1)
+	a.pdfPreviewBusy = true
+	go func() {
+		img, err := doc.RenderPage(page, pdfRenderDPI)
+		if a.win == nil {
+			return
+		}
+		if err != nil {
+			log.Printf("[pdf] 预览第 %d 页失败: %v", page, err)
+			a.win.Update(func() {
+				if a.pdfPreviewSeq.Load() != seq {
+					return
+				}
+				a.pdfPreviewBusy = false
+				a.setStatus("预览失败: "+err.Error(), true)
+			})
+			return
+		}
+		small := scalePreview(img, previewMaxW, previewMaxH)
+		bitmap := ui.NewBitmap(small)
+		a.win.Update(func() {
+			if a.pdfPreviewSeq.Load() != seq {
+				return
+			}
+			a.pdfPreview = bitmap
+			a.pdfPreviewAt = page
+			a.pdfPreviewBusy = false
+		})
+	}()
+}
+
+// startPDFConversion 把用户选中的页码导出成 PNG。
+func (a *app) startPDFConversion() {
+	if a.pdfBusy() {
+		return
+	}
+	doc := a.pdfDoc
+	if doc == nil {
+		a.setStatus("请先选择 PDF 文件", true)
+		return
+	}
+
+	start, end := pageRange(int(a.pdfStartPage+0.5), int(a.pdfEndPage+0.5), doc.PageCount)
+	a.pdfStartPage = float64(start)
+	a.pdfEndPage = float64(end)
+
+	seq := a.pdfSeq.Add(1)
+	a.generating = true
+	a.pdfConverting = true
+	a.progress = 0.02
+	a.statusErr = false
+	a.pdfOutputDir = ""
+	a.setStatus(fmt.Sprintf("正在转换第 %d–%d 页…", start, end), false)
+
+	options := pdfConvertOptions{
+		DPI:       a.pdfDPI(),
+		StartPage: start,
+		EndPage:   end,
+		Progress: func(status string, fraction float64) {
+			if a.win == nil {
+				return
+			}
+			a.win.Update(func() {
+				if a.pdfSeq.Load() != seq || !a.pdfConverting {
+					return
+				}
+				a.statusErr = false
+				a.progress = fraction
+				a.status = status
+			})
+		},
+	}
+
+	go func() {
+		dir, files, err := doc.ExportPNGs(options)
+		if err != nil {
+			if a.pdfSeq.Load() == seq {
+				a.finishPDFError(err.Error())
+			}
+			return
+		}
+		if a.pdfSeq.Load() != seq {
+			return
+		}
+		a.finishPDFSuccess(dir, files)
+	}()
+}
+
+func (a *app) finishPDFError(message string) {
+	if a.win == nil {
+		a.generating = false
+		a.pdfConverting = false
+		return
+	}
+	a.win.Update(func() {
+		a.generating = false
+		a.pdfConverting = false
+		a.progress = 0
+		log.Printf("[pdf] 失败：%s", message)
+		a.setStatus(message, true)
+	})
+}
+
+func (a *app) finishPDFSuccess(dir string, files []string) {
+	if a.win == nil {
+		a.generating = false
+		a.pdfConverting = false
+		return
+	}
+	a.win.Update(func() {
+		a.generating = false
+		a.pdfConverting = false
+		a.progress = 1
+		a.pdfOutputDir = dir
+		a.pdfPages = len(files)
+		log.Printf("[pdf] 完成：%d 张，%s", len(files), dir)
+		a.setStatus(fmt.Sprintf("已保存 %d 张 PNG · %s", len(files), dir), false)
 	})
 }
 
@@ -869,7 +1603,7 @@ func (a *app) previewPanel(c *ui.Context) {
 			case a.previewErr != "":
 				ui.Text(c, a.previewErr).TextColor(t.Danger).FontSize(12).MaxWidth(420)
 			case a.preview != nil:
-				ui.Image(c, a.preview).Grow(1).Fit(ui.Contain)
+				ui.Image(c, a.preview).Fill().Fit(ui.Contain)
 			case strings.TrimSpace(a.text) == "":
 				ui.Text(c, "拖入或选择 TXT 文件后，这里会显示实时预览").TextColor(t.TextMuted).FontSize(13)
 			default:
@@ -1703,12 +2437,8 @@ func safeFileBase(name string) string {
 	return out
 }
 
-var wordService *WordRender
-
 func main() {
 	a := newApp()
-	wordService = &WordRender{app: a}
-	mygo.Bind(wordService)
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     windowTitle,
@@ -1720,7 +2450,6 @@ func main() {
 			Content:   ui.View(a.view),
 		})
 		a.startFontScan()
-		a.initWordView()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
