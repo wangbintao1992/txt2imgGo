@@ -25,6 +25,15 @@
 #
 set -euo pipefail
 
+# ---------------------------------------------------------------- 注意事项
+#
+# 变量展开后面紧跟中文时一律写成 "${VAR}"，不能写 $VAR：
+# macOS 自带 bash 3.2，在 C locale（LANG=""/LC_CTYPE="C"）下按字节解析，
+# 会把紧跟的 UTF-8 中文字节当成变量名的一部分，报
+# "APP_VERSION（: unbound variable" 之类的错。
+# 全角括号 （） 尤其容易踩到。
+#
+
 # ---------------------------------------------------------------- 基础路径
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -71,7 +80,7 @@ while [ $# -gt 0 ]; do
 		--verify-run)  DO_VERIFY=1; shift ;;
 		--stop)        STOP_ONLY=1; shift ;;
 		-h|--help)     usage ;;
-		*)             die "未知参数：$1（用 --help 看用法）" ;;
+		*)             die "未知参数：${1}（用 --help 看用法）" ;;
 	esac
 done
 
@@ -146,14 +155,14 @@ if [ "$(go env CGO_ENABLED)" != "1" ]; then
 	warn "CGO_ENABLED 默认关闭，已强制设为 1（go-fitz 必须）"
 fi
 CC_BIN=$(go env CC); [ -n "$CC_BIN" ] || CC_BIN=clang
-command -v "$CC_BIN" >/dev/null 2>&1 || die "未找到 C 编译器 $CC_BIN（cgo 需要）"
+command -v "$CC_BIN" >/dev/null 2>&1 || die "未找到 C 编译器 ${CC_BIN}（cgo 需要）"
 
 ok "Go $GO_VERSION · $(go env GOOS)/$GO_ARCH"
 ok "CC = $CC_BIN"
 
 # 需要 Xcode 的 lipo / codesign / iconutil / ditto / hdiutil
 for tool in lipo codesign ditto; do
-	command -v "$tool" >/dev/null 2>&1 || die "缺少 $tool（Xcode Command Line Tools）"
+	command -v "$tool" >/dev/null 2>&1 || die "缺少 ${tool}（Xcode Command Line Tools）"
 done
 if [ "$MAKE_DMG" -eq 1 ]; then
 	command -v hdiutil >/dev/null 2>&1 || die "缺少 hdiutil，无法生成 dmg"
@@ -171,7 +180,7 @@ mkdir -p "$OUT_DIR"
 
 # ---------------------------------------------------------------- 开始构建
 
-step "编译 $APP_NAME $APP_VERSION（$PLATFORM）"
+step "编译 $APP_NAME ${APP_VERSION}（${PLATFORM}）"
 
 BUILD_FLAGS=()
 [ "$MAKE_DMG" -eq 1 ] || BUILD_FLAGS+=("-skip-dmg")
@@ -209,7 +218,7 @@ ARCH_INFO=$(lipo -archs "$EXECUTABLE" 2>/dev/null || echo "unknown")
 case "$PLATFORM" in
 	darwin/universal)
 		case "$ARCH_INFO" in
-			*arm64*x86_64*|*x86_64*arm64*) ok "架构：$ARCH_INFO（universal）" ;;
+			*arm64*x86_64*|*x86_64*arm64*) ok "架构：${ARCH_INFO}（universal）" ;;
 			*) die "期望 arm64 + x86_64，实际只有 $ARCH_INFO" ;;
 		esac ;;
 	darwin/arm64)  case "$ARCH_INFO" in *arm64*) ok "架构：$ARCH_INFO" ;; *) die "架构不符：$ARCH_INFO" ;; esac ;;
@@ -241,7 +250,7 @@ for key in CFBundleExecutable CFBundleIdentifier CFBundleShortVersionString; do
 	val=$(plutil -extract "$key" raw "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)
 	[ -n "$val" ] || die "Info.plist 缺少 $key"
 done
-ok "Info.plist 完整（$APP_ID $APP_VERSION）"
+ok "Info.plist 完整（$APP_ID ${APP_VERSION}）"
 
 # 5) 体积
 SIZE=$(du -sh "$APP_BUNDLE" | awk '{print $1}')
@@ -293,7 +302,7 @@ if [ "$MAKE_ZIP" -eq 1 ]; then
 	rm -f "$ZIP_PATH"
 	# ditto 保留扩展属性与签名封条；zip 命令会破坏 .app 的签名
 	ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
-	ok "$ZIP_PATH（$(du -sh "$ZIP_PATH" | awk '{print $1}')）"
+	ok "${ZIP_PATH}（$(du -sh "$ZIP_PATH" | awk '{print $1}')）"
 fi
 
 # ---------------------------------------------------------------- 汇总
