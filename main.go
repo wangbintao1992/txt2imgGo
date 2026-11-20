@@ -2449,6 +2449,10 @@ func main() {
 			StateKey:  "main-v2",
 			Content:   ui.View(a.view),
 		})
+		// mygo 关掉最后一个窗口后不会自动退出（applicationShouldTerminate-
+		// AfterLastWindowClosed 固定返回 false），进程会挂在后台。本应用只有
+		// 这一个窗口，关窗即退出，避免留下看不到的后台进程。
+		a.win.OnClosed(func() { mygo.App.Quit() })
 		a.startFontScan()
 	})
 	if err := mygo.App.Run(); err != nil {

@@ -1,4 +1,5 @@
 /build/
+/dist/
 /.mygo/
 /.idea/
 .DS_Store

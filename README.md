@@ -137,6 +137,40 @@ CGO_ENABLED=1 go tool mygo build
 
 产物位于 `build/`。也可以直接用 `go build` 编译当前平台的命令行可执行文件（默认已启用 CGO）。
 
+## 打包可独立运行的执行文件
+
+用项目根目录的 `package.sh` 一步出包，产物在 `dist/`：
+
+```bash
+./package.sh                 # universal（arm64 + x86_64）zip 包
+./package.sh --dmg           # 同时生成 dmg 安装镜像
+./package.sh -p darwin/arm64 # 只打 Apple Silicon，体积更小
+./package.sh --verify-run    # 打完做启动冒烟测试
+./package.sh --open          # 打完直接打开
+./package.sh --stop          # 结束残留的 TXT2Img 进程
+./package.sh --clean         # 先删 dist/ 再打包
+```
+
+产物：
+
+- `dist/<平台>/TXT2Img.app` —— 双击即用，不需要 Go 环境和任何依赖
+- `dist/TXT2Img-<version>-macos-<arch>.zip` —— 解压即用，可直接发给别人
+- `dist/<平台>/txt2img-<version>.dmg` —— 加 `--dmg` 时生成
+
+脚本做的事：
+
+1. 检查 Go / clang / Xcode 工具链，强制 `CGO_ENABLED=1`（go-fitz 的 MuPDF 是静态库，必须 cgo）
+2. 清理残留进程，调用 `go tool mygo build` 生成带 Info.plist、图标和 ad-hoc 签名的 `.app`
+3. 校验产物是否真的可独立运行：架构、`otool -L` 是否只有系统库、`codesign --verify`、Info.plist 字段
+4. 用 `ditto` 打包 zip（普通 `zip` 会破坏 `.app` 的签名封条）
+5. `--verify-run` 会启动应用、点关闭按钮，确认关窗后进程退出、不留后台进程
+
+> 直接 `go build` 出来的裸二进制没有 Info.plist，双击没有 Dock 图标和菜单栏，不建议作为分发产物。
+>
+> 关窗即退出的行为由 `main.go` 里 `a.win.OnClosed(func() { mygo.App.Quit() })` 保证：mygo 默认在最后一个窗口关闭后不退出（`applicationShouldTerminateAfterLastWindowClosed` 固定返回 `false`），单窗口应用需要自己处理，否则会留下看不到的后台进程。
+>
+> Word 转 PDF 依赖本机安装的 LibreOffice，这是外部程序，不随包分发。
+
 ## 开源协议
 
 本项目基于 **非商业使用许可（Non-Commercial License）** 开源：
